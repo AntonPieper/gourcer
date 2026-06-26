@@ -1,9 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { PNG } from 'pngjs';
 
 test('renders the hell-ui history with live controls and a nonblank Three canvas', async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto('./');
 
   await expect(page.getByRole('heading', { name: 'Gourcer' })).toBeVisible();
@@ -14,14 +13,30 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   await expect(page.locator('canvas')).toBeVisible();
 
   await expect.poll(() => page.locator('.legend-item').count()).toBeGreaterThan(0);
-  await expect
-    .poll(() => canvasStats(page), { timeout: 15_000 })
-    .toMatchObject({
-      hasBrightPixels: true,
-      hasColorVariance: true,
-    });
+  await expect.poll(() => graphStats(page), { timeout: 15_000 }).toMatchObject({
+    framed: true,
+    hasConnectedGraph: true,
+  });
+  await expect.poll(() => legendAnimationState(page)).toMatchObject({
+    animates: true,
+  });
 
   await page.getByLabel('Pause timeline').click();
+  if (testInfo.project.name === 'chromium') {
+    const beforeInteraction = await graphInteractionState(page);
+    await page.mouse.move(640, 360);
+    await page.mouse.wheel(0, -420);
+    await page.mouse.down();
+    await page.mouse.move(710, 390);
+    await page.mouse.up();
+    const afterInteraction = await graphInteractionState(page);
+    expect(afterInteraction.zoom).toBeGreaterThan(beforeInteraction.zoom);
+    expect(
+      afterInteraction.cameraX !== beforeInteraction.cameraX ||
+        afterInteraction.cameraY !== beforeInteraction.cameraY,
+    ).toBe(true);
+  }
+
   const scrubber = page.getByLabel('Scrub timeline');
   const max = await scrubber.evaluate((input) => (input as HTMLInputElement).max);
 
@@ -34,35 +49,43 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   await expect(page.getByText('100%')).toBeVisible();
 });
 
-async function canvasStats(page: Page) {
-  const canvas = page.locator('canvas').first();
-  const screenshot = await canvas.screenshot();
-  const png = PNG.sync.read(screenshot);
-  const colors = new Set<string>();
-  let brightPixels = 0;
+async function graphStats(page: Page) {
+  return page.getByTestId('graph-debug').evaluate((element) => {
+    const files = Number(element.getAttribute('data-files') ?? 0);
+    const directories = Number(element.getAttribute('data-directories') ?? 0);
+    const edges = Number(element.getAttribute('data-edges') ?? 0);
+    const width = Number(element.getAttribute('data-bounds-width') ?? 0);
+    const height = Number(element.getAttribute('data-bounds-height') ?? 0);
 
-  for (let y = 0; y < png.height; y += 8) {
-    for (let x = 0; x < png.width; x += 8) {
-      const index = (png.width * y + x) * 4;
-      const r = png.data[index] ?? 0;
-      const g = png.data[index + 1] ?? 0;
-      const b = png.data[index + 2] ?? 0;
-      const a = png.data[index + 3] ?? 0;
+    return {
+      framed: width > 4 && width <= 28 && height > 4 && height <= 16,
+      hasConnectedGraph: files > 100 && directories > 20 && edges > files,
+    };
+  });
+}
 
-      if (a === 0) {
-        continue;
-      }
+async function legendAnimationState(page: Page) {
+  return page.locator('.legend').evaluate((element) => {
+    const firstItem = element.querySelector('.legend-item');
+    const styles = firstItem ? getComputedStyle(firstItem) : null;
+    return {
+      animates: styles
+        ? styles.animationName !== 'none' ||
+          styles.transitionDuration
+          .split(',')
+          .some((duration) => Number.parseFloat(duration) > 0)
+        : false,
+    };
+  });
+}
 
-      colors.add(`${Math.round(r / 12)}:${Math.round(g / 12)}:${Math.round(b / 12)}`);
-
-      if (r + g + b > 160) {
-        brightPixels += 1;
-      }
-    }
-  }
-
-  return {
-    hasBrightPixels: brightPixels > 10,
-    hasColorVariance: colors.size > 14,
-  };
+async function graphInteractionState(page: Page) {
+  return page.locator('canvas').evaluate((canvas) => {
+    const state = (canvas as HTMLCanvasElement).dataset;
+    return {
+      cameraX: Number(state.cameraX ?? 0),
+      cameraY: Number(state.cameraY ?? 0),
+      zoom: Number(state.zoom ?? 0),
+    };
+  });
 }

@@ -1,9 +1,13 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import type {
   FrameBeam,
+  FrameBounds,
   FrameContributor,
+  FrameDirectory,
+  FrameEdge,
   FrameFile,
   FrameGroup,
   Point,
@@ -19,10 +23,17 @@ export function GourceScene({
 }) {
   return (
     <Canvas
-      camera={{ fov: 46, position: [0, 0, 23] }}
+      camera={{
+        far: 1000,
+        near: 0.1,
+        position: [frame.bounds.center.x, frame.bounds.center.y, 100],
+        zoom: 42,
+      }}
       className="gource-canvas"
-      gl={{ antialias: true, preserveDrawingBuffer: true }}
+      dpr={[1, 1.5]}
+      gl={{ antialias: true }}
       onCreated={({ gl }) => onCanvasReady(gl.domElement)}
+      orthographic
     >
       <SceneContents frame={frame} />
     </Canvas>
@@ -33,16 +44,23 @@ function SceneContents({ frame }: { frame: TimelineFrame }) {
   return (
     <>
       <SceneBackground color={frame.backgroundColor} />
-      <ambientLight intensity={1.6} />
+      <FitCamera bounds={frame.bounds} />
+      <PanZoomControls />
+      <ambientLight intensity={1.8} />
       <group>
         {frame.groups.map((group) => (
           <SemanticGroupMesh group={group} key={group.id} />
         ))}
-        {frame.files.map((file) => (
-          <FileNodeMesh file={file} key={file.path} />
-        ))}
+        <EdgesLayer directories={frame.directories} edges={frame.edges} files={frame.files} />
+        <DirectoryNodesLayer directories={frame.directories} />
+        <FileNodesLayer files={frame.files} />
         {frame.beams.map((beam) => (
-          <BeamMesh beam={beam} files={frame.files} contributors={frame.contributors} key={beam.id} />
+          <BeamMesh
+            beam={beam}
+            contributors={frame.contributors}
+            files={frame.files}
+            key={beam.id}
+          />
         ))}
         {frame.contributors.map((contributor) => (
           <ContributorSprite contributor={contributor} key={contributor.id} />
@@ -62,47 +80,219 @@ function SceneBackground({ color }: { color: string }) {
   return null;
 }
 
+function FitCamera({ bounds }: { bounds: FrameBounds }) {
+  const { camera, size } = useThree();
+  const fittedKey = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!(camera instanceof THREE.OrthographicCamera)) {
+      return;
+    }
+
+    const key = `${bounds.width}:${bounds.height}:${size.width}:${size.height}`;
+
+    if (fittedKey.current === key) {
+      return;
+    }
+
+    const isNarrow = size.width < 720;
+    const horizontalCoverage = isNarrow ? 0.5 : 0.72;
+    const verticalCoverage = isNarrow ? 0.36 : 0.58;
+    const horizontalZoom = (size.width * horizontalCoverage) / Math.max(bounds.width, 1);
+    const verticalZoom = (size.height * verticalCoverage) / Math.max(bounds.height, 1);
+    camera.position.set(bounds.center.x, bounds.center.y, 100);
+    camera.zoom = Math.min(horizontalZoom, verticalZoom);
+    camera.updateProjectionMatrix();
+    fittedKey.current = key;
+  }, [bounds, camera, size.height, size.width]);
+
+  return null;
+}
+
+function PanZoomControls() {
+  const { camera, gl } = useThree();
+  const controlsRef = useRef<MapControls | null>(null);
+
+  useEffect(() => {
+    const controls = new MapControls(camera, gl.domElement);
+    controls.enableDamping = true;
+    controls.enableRotate = false;
+    controls.maxZoom = 160;
+    controls.minZoom = 8;
+    controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+    controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    controls.screenSpacePanning = true;
+    controlsRef.current = controls;
+
+    return () => {
+      controlsRef.current = null;
+      controls.dispose();
+    };
+  }, [camera, gl.domElement]);
+
+  useFrame(({ camera }) => {
+    controlsRef.current?.update();
+    gl.domElement.dataset.cameraX = camera.position.x.toFixed(3);
+    gl.domElement.dataset.cameraY = camera.position.y.toFixed(3);
+    gl.domElement.dataset.zoom =
+      camera instanceof THREE.OrthographicCamera ? camera.zoom.toFixed(3) : '0';
+    camera.updateMatrixWorld();
+  });
+
+  return null;
+}
+
 function SemanticGroupMesh({ group }: { group: FrameGroup }) {
-  const material = usePulseMaterial(group.color, 0.28);
+  const material = usePulseMaterial(group.color, 0.18);
   const geometry = useMemo(
     () => roundedRectGeometry(group.shape.width, group.shape.height, group.shape.radius),
     [group.shape.height, group.shape.radius, group.shape.width],
   );
 
   return (
-    <group position={[group.shape.center.x, group.shape.center.y, -0.45]}>
+    <group position={[group.shape.center.x, group.shape.center.y, -0.55]}>
       <mesh geometry={geometry}>
         <primitive attach="material" object={material} />
       </mesh>
       <TextSprite
         color="#f8fbff"
-        position={[0, group.shape.height / 2 + 0.34, 0.08]}
-        scale={[group.shape.width * 0.42, 0.48, 1]}
+        position={[0, group.shape.height / 2 + 0.28, 0.12]}
+        scale={[Math.min(group.shape.width * 0.34, 3.2), 0.38, 1]}
         text={group.title}
       />
     </group>
   );
 }
 
-function FileNodeMesh({ file }: { file: FrameFile }) {
-  const meshRef = useRef<THREE.Mesh>(null);
+function EdgesLayer({
+  directories,
+  edges,
+  files,
+}: {
+  directories: FrameDirectory[];
+  edges: FrameEdge[];
+  files: FrameFile[];
+}) {
+  const geometry = useMemo(() => {
+    const positions: number[] = [];
+    const nodes = new Map<string, Point>();
 
-  useFrame((_state, delta) => {
-    const mesh = meshRef.current;
+    directories.forEach((directory) => nodes.set(directory.id, directory.position));
+    files.forEach((file) => nodes.set(file.id, file.position));
 
-    if (!mesh) {
-      return;
-    }
+    edges.forEach((edge) => {
+      const source = nodes.get(edge.sourceId);
+      const target = nodes.get(edge.targetId);
 
-    mesh.position.lerp(vectorFromPoint(file.position, 0.1), 1 - Math.exp(-delta * 8));
-  });
+      if (!source || !target) {
+        return;
+      }
+
+      positions.push(source.x, source.y, -0.12, target.x, target.y, -0.12);
+    });
+
+    const buffer = new THREE.BufferGeometry();
+    buffer.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    return buffer;
+  }, [directories, edges, files]);
 
   return (
-    <mesh ref={meshRef} position={[file.position.x, file.position.y, 0.1]}>
-      <circleGeometry args={[0.12, 28]} />
-      <meshBasicMaterial color={file.language.color} />
-    </mesh>
+    <lineSegments geometry={geometry}>
+      <lineBasicMaterial color="#91a4bd" opacity={0.28} transparent />
+    </lineSegments>
   );
+}
+
+function DirectoryNodesLayer({ directories }: { directories: FrameDirectory[] }) {
+  const { geometry, material } = usePointsLayer(
+    directories,
+    () => '#9fb3c8',
+    (directory) => 8 + Math.max(0, 4 - directory.depth),
+    -0.02,
+  );
+
+  return <points geometry={geometry} material={material} />;
+}
+
+function FileNodesLayer({ files }: { files: FrameFile[] }) {
+  const { geometry, material } = usePointsLayer(
+    files,
+    (file) => file.language.color,
+    () => 4.4,
+    0.08,
+  );
+
+  return <points geometry={geometry} material={material} />;
+}
+
+function usePointsLayer<T extends { opacity: number; position: Point }>(
+  nodes: T[],
+  colorFor: (node: T) => string,
+  sizeFor: (node: T) => number,
+  z: number,
+) {
+  const geometry = useMemo(() => {
+    const positions = new Float32Array(nodes.length * 3);
+    const colors = new Float32Array(nodes.length * 3);
+    const opacities = new Float32Array(nodes.length);
+    const sizes = new Float32Array(nodes.length);
+    const color = new THREE.Color();
+
+    nodes.forEach((node, index) => {
+      positions[index * 3] = node.position.x;
+      positions[index * 3 + 1] = node.position.y;
+      positions[index * 3 + 2] = z;
+      color.set(colorFor(node));
+      colors[index * 3] = color.r;
+      colors[index * 3 + 1] = color.g;
+      colors[index * 3 + 2] = color.b;
+      opacities[index] = node.opacity;
+      sizes[index] = sizeFor(node);
+    });
+
+    const buffer = new THREE.BufferGeometry();
+    buffer.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    buffer.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
+    buffer.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
+    buffer.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    return buffer;
+  }, [colorFor, nodes, sizeFor, z]);
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        depthWrite: false,
+        transparent: true,
+        vertexShader: `
+          attribute vec3 aColor;
+          attribute float aOpacity;
+          attribute float aSize;
+          varying vec3 vColor;
+          varying float vOpacity;
+
+          void main() {
+            vColor = aColor;
+            vOpacity = aOpacity;
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = aSize;
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+        fragmentShader: `
+          varying vec3 vColor;
+          varying float vOpacity;
+
+          void main() {
+            vec2 centered = gl_PointCoord - vec2(0.5);
+            float distanceToCenter = length(centered);
+            float alpha = smoothstep(0.5, 0.22, distanceToCenter) * vOpacity;
+            gl_FragColor = vec4(vColor, alpha);
+          }
+        `,
+      }),
+    [],
+  );
+
+  return { geometry, material };
 }
 
 function ContributorSprite({ contributor }: { contributor: FrameContributor }) {
@@ -116,9 +306,9 @@ function ContributorSprite({ contributor }: { contributor: FrameContributor }) {
       return;
     }
 
-    sprite.position.lerp(vectorFromPoint(contributor.position, 0.9), 1 - Math.exp(-delta * 4.5));
+    sprite.position.lerp(vectorFromPoint(contributor.position, 0.9), 1 - Math.exp(-delta * 5.2));
     sprite.material.opacity +=
-      (contributor.opacity - sprite.material.opacity) * (1 - Math.exp(-delta * 6));
+      (contributor.opacity - sprite.material.opacity) * (1 - Math.exp(-delta * 7));
     sprite.material.needsUpdate = true;
   });
 
@@ -127,7 +317,7 @@ function ContributorSprite({ contributor }: { contributor: FrameContributor }) {
       ref={spriteRef}
       material={material}
       position={[contributor.position.x, contributor.position.y, 0.9]}
-      scale={[0.72, 0.72, 1]}
+      scale={[0.74, 0.74, 1]}
     />
   );
 }
@@ -143,19 +333,33 @@ function BeamMesh({
 }) {
   const contributor = contributors.find((item) => item.id === beam.fromContributorId);
   const file = files.find((item) => item.path === beam.toFilePath);
-  const material = useBeamMaterial(beam.color, beam.intensity);
-  const geometry = useMemo(() => {
-    const from = vectorFromPoint(contributor?.position ?? { x: 0, y: 0 }, 0.65);
-    const to = vectorFromPoint(file?.position ?? { x: 0, y: 0 }, 0.35);
-    return new THREE.BufferGeometry().setFromPoints([from, to]);
-  }, [contributor?.position, file?.position]);
-  const line = useMemo(() => new THREE.Line(geometry, material), [geometry, material]);
+  const material = useBeamMaterial(beam.color, beam.intensity * beam.strength * 0.58);
+  const geometry = useMemo(() => new THREE.CylinderGeometry(1, 1, 1, 10, 1, true), []);
 
   if (!contributor || !file) {
     return null;
   }
 
-  return <primitive object={line} />;
+  const from = vectorFromPoint(contributor.position, 0.52);
+  const to = vectorFromPoint(file.position, 0.24);
+  const direction = to.clone().sub(from);
+  const length = direction.length();
+  const midpoint = from.clone().add(to).multiplyScalar(0.5);
+  const quaternion = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    direction.clone().normalize(),
+  );
+
+  return (
+    <mesh
+      geometry={geometry}
+      position={midpoint}
+      quaternion={quaternion}
+      scale={[beam.width * 0.82, length, beam.width * 0.82]}
+    >
+      <primitive attach="material" object={material} />
+    </mesh>
+  );
 }
 
 function TextSprite({
@@ -229,9 +433,8 @@ function usePulseMaterial(color: string, opacity: number) {
           varying vec2 vUv;
 
           void main() {
-            float edge = smoothstep(0.0, 0.45, vUv.x) * smoothstep(1.0, 0.55, vUv.x);
-            float pulse = 0.08 * sin(uTime * 1.7 + vUv.y * 8.0);
-            gl_FragColor = vec4(uColor + pulse, uOpacity * edge);
+            float glow = 0.78 + 0.22 * sin(uTime * 1.6 + vUv.y * 7.0);
+            gl_FragColor = vec4(uColor * glow, uOpacity);
           }
         `,
       }),
@@ -252,6 +455,7 @@ function useBeamMaterial(color: string, intensity: number) {
       new THREE.ShaderMaterial({
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        side: THREE.DoubleSide,
         transparent: true,
         uniforms: {
           uColor: { value: new THREE.Color(color) },
@@ -263,7 +467,7 @@ function useBeamMaterial(color: string, intensity: number) {
           uniform float uTime;
 
           void main() {
-            vPulse = 0.65 + 0.35 * sin(uTime * 18.0 + position.x * 4.0);
+            vPulse = 0.72 + 0.28 * sin(uTime * 22.0 + position.y * 16.0);
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
         `,
@@ -273,7 +477,7 @@ function useBeamMaterial(color: string, intensity: number) {
           varying float vPulse;
 
           void main() {
-            gl_FragColor = vec4(uColor, uIntensity * vPulse);
+            gl_FragColor = vec4(uColor, clamp(uIntensity * vPulse, 0.0, 0.95));
           }
         `,
       }),
@@ -318,13 +522,19 @@ function useAvatarMaterial(url: string) {
   }, [url]);
 
   return useMemo(
-    () =>
-      new THREE.SpriteMaterial({
+    () => {
+      const parameters: THREE.SpriteMaterialParameters = {
         color: texture ? '#ffffff' : '#9fb3c8',
-        map: texture ?? undefined,
         opacity: 0,
         transparent: true,
-      }),
+      };
+
+      if (texture) {
+        parameters.map = texture;
+      }
+
+      return new THREE.SpriteMaterial(parameters);
+    },
     [texture],
   );
 }
@@ -345,7 +555,7 @@ function roundedRectGeometry(width: number, height: number, radius: number) {
   shape.lineTo(x, y + r);
   shape.quadraticCurveTo(x, y, x + r, y);
 
-  return new THREE.ShapeGeometry(shape, 32);
+  return new THREE.ShapeGeometry(shape, 16);
 }
 
 function vectorFromPoint(point: Point, z: number) {

@@ -33,21 +33,23 @@ describe('buildTimelineFrame', () => {
       commits: [
         {
           author: { email: 'ada@example.com', name: 'Ada' },
-          changes: [{ kind: 'add', path: 'src/ui/App.tsx' }],
+          changes: [{ additions: 40, deletions: 5, kind: 'add', path: 'src/ui/App.tsx' }],
           id: 'c1',
           message: 'Start UI',
           timestamp: '2026-01-01T00:00:00.000Z',
         },
         {
           author: { email: 'grace@example.com', name: 'Grace' },
-          changes: [{ kind: 'modify', path: 'src/engine/timeline.ts' }],
+          changes: [
+            { additions: 2, deletions: 3, kind: 'modify', path: 'src/engine/timeline.ts' },
+          ],
           id: 'c2',
           message: 'Tune engine',
           timestamp: '2026-01-06T00:00:00.000Z',
         },
         {
           author: { email: 'ada@example.com', name: 'Ada' },
-          changes: [{ kind: 'delete', path: 'src/ui/OldPanel.tsx' }],
+          changes: [{ additions: 0, deletions: 90, kind: 'delete', path: 'src/ui/OldPanel.tsx' }],
           id: 'c3',
           message: 'Remove old panel',
           timestamp: '2026-01-10T00:00:00.000Z',
@@ -63,6 +65,17 @@ describe('buildTimelineFrame', () => {
     expect(frame.captions).toEqual(['The interface appears.']);
     expect(frame.backgroundColor).toBe('#081c31');
     expect(frame.languages.map((language) => language.name)).toEqual(['TypeScript']);
+    expect(frame.directories.map((directory) => directory.path)).toEqual(
+      expect.arrayContaining(['src', 'src/ui', 'src/engine']),
+    );
+    expect(frame.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceId: 'dir:src', targetId: 'dir:src/ui' }),
+        expect.objectContaining({ sourceId: 'dir:src/ui', targetId: 'file:src/ui/App.tsx' }),
+      ]),
+    );
+    expect(frame.bounds.width).toBeLessThanOrEqual(28);
+    expect(frame.bounds.height).toBeLessThanOrEqual(16);
     expect(frame.groups).toEqual([
       expect.objectContaining({
         fileCount: 2,
@@ -103,7 +116,9 @@ describe('buildTimelineFrame', () => {
       expect.objectContaining({
         color: '#ffad4d',
         fromContributorId: 'grace@example.com',
+        strength: 0.42,
         toFilePath: 'src/engine/timeline.ts',
+        width: 0.08,
       }),
     ]);
 
@@ -115,5 +130,39 @@ describe('buildTimelineFrame', () => {
     expect(afterAllPulses.contributors.every((contributor) => contributor.opacity === 0)).toBe(
       true,
     );
+  });
+
+  it('initializes pre-existing files at timeline start and tears down deleted files over time', () => {
+    const sidecar = parseSidecar({
+      initialFiles: ['src/existing.ts', 'src/removed.ts'],
+      commits: [
+        {
+          author: { email: 'ada@example.com', name: 'Ada' },
+          changes: [
+            { additions: 3, deletions: 1, kind: 'modify', path: 'src/existing.ts' },
+            { additions: 0, deletions: 20, kind: 'delete', path: 'src/removed.ts' },
+            { additions: 7, deletions: 0, kind: 'add', path: 'src/new.ts' },
+          ],
+          id: 'c1',
+          message: 'Change files',
+          timestamp: '2026-01-02T00:00:00.000Z',
+        },
+      ],
+    });
+
+    const startFrame = buildTimelineFrame(sidecar, sidecar.timeline.start);
+    expect(startFrame.files.map((file) => file.path)).toEqual(
+      expect.arrayContaining(['src/existing.ts', 'src/removed.ts', 'src/new.ts']),
+    );
+
+    const laterFrame = buildTimelineFrame(
+      sidecar,
+      Date.parse('2026-01-05T00:00:00.000Z'),
+    );
+
+    expect(laterFrame.files.map((file) => file.path)).toEqual(
+      expect.arrayContaining(['src/existing.ts', 'src/new.ts']),
+    );
+    expect(laterFrame.files.some((file) => file.path === 'src/removed.ts')).toBe(false);
   });
 });

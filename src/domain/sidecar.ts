@@ -10,7 +10,9 @@ export type RawSidecar = {
   captions?: RawCaption[];
   commits: RawCommit[];
   groups?: RawGroup[];
+  initialFiles?: string[];
   languages?: Record<string, Partial<Omit<LanguageMetadata, 'extension'>>>;
+  layout?: RawGraphLayout;
   settings?: Partial<SidecarSettings>;
 };
 
@@ -26,8 +28,11 @@ export type RawCommit = {
     name: string;
   };
   changes: Array<{
+    additions?: number;
+    deletions?: number;
     kind: ChangeKind;
     path: string;
+    previousPath?: string;
   }>;
   id: string;
   message: string;
@@ -39,6 +44,32 @@ export type RawGroup = {
   id: string;
   pathPrefixes: string[];
   title: string;
+};
+
+export type RawGraphLayout = {
+  bounds: {
+    center: {
+      x: number;
+      y: number;
+    };
+    height: number;
+    width: number;
+  };
+  edges: Array<{
+    id: string;
+    sourceId: string;
+    targetId: string;
+  }>;
+  nodes: Array<{
+    depth: number;
+    groupId: string | null;
+    id: string;
+    name: string;
+    path: string;
+    type: 'directory' | 'file';
+    x: number;
+    y: number;
+  }>;
 };
 
 export type SidecarSettings = {
@@ -75,8 +106,10 @@ export type FileNode = {
 
 export type ChangePulse = {
   beamColor: string;
+  editSize: number;
   filePath: string;
   kind: ChangeKind;
+  previousPath: string | null;
 };
 
 export type CommitEvent = {
@@ -93,6 +126,8 @@ export type ParsedSidecar = {
   contributors: Record<string, Contributor>;
   files: Record<string, FileNode>;
   groups: SemanticGroup[];
+  initialFiles: string[];
+  layout: RawGraphLayout | null;
   settings: SidecarSettings;
   timeline: TimelineRange;
 };
@@ -120,6 +155,11 @@ export function parseSidecar(raw: RawSidecar): ParsedSidecar {
   const files: Record<string, FileNode> = {};
   const contributors: Record<string, Contributor> = {};
   const languageOverrides = normalizeLanguageOverrides(raw.languages ?? {});
+  const initialFiles = Array.from(new Set(raw.initialFiles ?? [])).sort();
+
+  initialFiles.forEach((path) => {
+    ensureFile(path, files, groups, languageOverrides);
+  });
 
   const commits = raw.commits.map((commit) => {
     const author = normalizeContributor(commit.author);
@@ -128,25 +168,18 @@ export function parseSidecar(raw: RawSidecar): ParsedSidecar {
     return {
       author,
       changes: commit.changes.map((change) => {
-        if (!files[change.path]) {
-          const group = groupForPath(change.path, groups);
-          const file: FileNode = {
-            groupId: group?.id ?? null,
-            language: canonicalLanguageForExtension(
-              extensionForPath(change.path),
-              languageOverrides,
-            ),
-            path: change.path,
-          };
+        ensureFile(change.path, files, groups, languageOverrides);
 
-          files[change.path] = file;
-          group?.filePaths.push(change.path);
+        if (change.previousPath) {
+          ensureFile(change.previousPath, files, groups, languageOverrides);
         }
 
         return {
           beamColor: beamColors[change.kind],
+          editSize: Math.max(1, (change.additions ?? 0) + (change.deletions ?? 0)),
           filePath: change.path,
           kind: change.kind,
+          previousPath: change.previousPath ?? null,
         };
       }),
       id: commit.id,
@@ -167,9 +200,40 @@ export function parseSidecar(raw: RawSidecar): ParsedSidecar {
     contributors,
     files,
     groups,
+    initialFiles,
+    layout: raw.layout ?? null,
     settings,
     timeline: timelineFor(commits),
   };
+}
+
+function ensureFile(
+  path: string,
+  files: Record<string, FileNode>,
+  groups: SemanticGroup[],
+  languageOverrides: Record<string, Partial<Omit<LanguageMetadata, 'extension'>>>,
+) {
+  if (files[path]) {
+    return files[path];
+  }
+
+  const group = groupForPath(path, groups);
+  const file: FileNode = {
+    groupId: group?.id ?? null,
+    language: canonicalLanguageForExtension(
+      extensionForPath(path),
+      languageOverrides,
+    ),
+    path,
+  };
+
+  files[path] = file;
+
+  if (group && !group.filePaths.includes(path)) {
+    group.filePaths.push(path);
+  }
+
+  return file;
 }
 
 function normalizeContributor(author: RawCommit['author']): Contributor {

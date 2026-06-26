@@ -35,8 +35,16 @@ export function App() {
 
     const tick = (now: number) => {
       const previousNow = animationTimeRef.current ?? now;
+      const elapsedMs = now - previousNow;
+      const targetFrameMs = exportState.status === 'recording' ? 33 : 90;
+
+      if (elapsedMs < targetFrameMs) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+
       animationTimeRef.current = now;
-      const deltaSeconds = Math.min((now - previousNow) / 1000, 0.2);
+      const deltaSeconds = Math.min(elapsedMs / 1000, 0.25);
 
       setCurrentTime((time) => {
         if (time === null) {
@@ -154,6 +162,16 @@ export function App() {
         onTimeChange={setCurrentTime}
         sidecar={sidecar}
       />
+      <div
+        aria-hidden="true"
+        className="graph-debug"
+        data-bounds-height={frame.bounds.height}
+        data-bounds-width={frame.bounds.width}
+        data-directories={frame.directories.length}
+        data-edges={frame.edges.length}
+        data-files={frame.files.length}
+        data-testid="graph-debug"
+      />
     </main>
   );
 }
@@ -196,7 +214,7 @@ function TimelineHud({
 
       <aside className="legend" aria-label="Languages used near current time">
         {frame.languages.slice(0, 8).map((language) => (
-          <div className="legend-item" key={language.name}>
+          <div className="legend-item" key={`${language.name}:${language.fileCount}`}>
             <img alt="" height="24" src={svgToDataUri(language.icon)} width="24" />
             <span className="legend-color" style={{ background: language.color }} />
             <span>{language.name}</span>

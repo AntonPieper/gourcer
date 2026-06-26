@@ -49,8 +49,8 @@ describe('sidecarFromGitNameStatusLog', () => {
       {
         author: { email: 'ada@example.com', name: 'Ada' },
         changes: [
-          { kind: 'add', path: 'packages/angular/src/button.ts' },
-          { kind: 'modify', path: 'docs/adr/rendering.md' },
+          { additions: 1, deletions: 0, kind: 'add', path: 'packages/angular/src/button.ts' },
+          { additions: 1, deletions: 0, kind: 'modify', path: 'docs/adr/rendering.md' },
         ],
         id: 'ca1',
         message: 'Add UI',
@@ -59,8 +59,14 @@ describe('sidecarFromGitNameStatusLog', () => {
       {
         author: { email: 'grace@example.com', name: 'Grace' },
         changes: [
-          { kind: 'delete', path: 'packages/angular/src/draft.ts' },
-          { kind: 'modify', path: 'packages/angular/src/new-path.ts' },
+          { additions: 1, deletions: 0, kind: 'delete', path: 'packages/angular/src/draft.ts' },
+          {
+            additions: 1,
+            deletions: 0,
+            kind: 'modify',
+            path: 'packages/angular/src/new-path.ts',
+            previousPath: 'old/path.ts',
+          },
         ],
         id: 'cb2',
         message: 'Remove draft',

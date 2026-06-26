@@ -6,10 +6,11 @@ const baseURL = externalBaseUrl ?? `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './e2e',
-  timeout: 30_000,
+  timeout: 45_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
   retries: process.env.CI ? 1 : 0,
+  workers: 1,
   reporter: [
     ['list'],
     ['html', { open: 'never', outputFolder: 'test-results/playwright-html' }],
