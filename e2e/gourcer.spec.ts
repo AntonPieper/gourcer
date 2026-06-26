@@ -18,8 +18,11 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
     hasConnectedGraph: true,
     hasReadableSpacing: true,
   });
-  await expect.poll(() => legendAnimationState(page)).toMatchObject({
-    animates: true,
+  await expect.poll(() => legendAnimates(page)).toBe(true);
+  await expect.poll(() => graphAnimationState(page), { timeout: 15_000 }).toMatchObject({
+    hasAnimatedGraph: true,
+    simulationResponsive: true,
+    smoothSteps: true,
   });
 
   const playingTime = await currentTimelineTime(page);
@@ -57,6 +60,9 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
     range.dispatchEvent(new Event('input', { bubbles: true }));
   }, max);
 
+  await expect.poll(() => graphAnimationState(page), { timeout: 5_000 }).toMatchObject({
+    smoothSteps: true,
+  });
   await expect(page.getByText('100%')).toBeVisible();
 });
 
@@ -84,18 +90,18 @@ async function currentTimelineTime(page: Page) {
     .evaluate((element) => Number(element.getAttribute('data-current-time') ?? 0));
 }
 
-async function legendAnimationState(page: Page) {
+async function legendAnimates(page: Page) {
   return page.locator('.legend').evaluate((element) => {
-    const firstItem = element.querySelector('.legend-item');
-    const styles = firstItem ? getComputedStyle(firstItem) : null;
-    return {
-      animates: styles
-        ? styles.animationName !== 'none' ||
-          styles.transitionDuration
+    const items = Array.from(element.querySelectorAll('.legend-item'));
+    return items.some((item) => {
+      const styles = getComputedStyle(item);
+      return (
+        styles.animationName !== 'none' ||
+        styles.transitionDuration
           .split(',')
-          .some((duration) => Number.parseFloat(duration) > 0)
-        : false,
-    };
+        .some((duration) => Number.parseFloat(duration) > 0)
+      );
+    });
   });
 }
 
@@ -106,6 +112,24 @@ async function graphInteractionState(page: Page) {
       cameraX: Number(state.cameraX ?? 0),
       cameraY: Number(state.cameraY ?? 0),
       zoom: Number(state.zoom ?? 0),
+    };
+  });
+}
+
+async function graphAnimationState(page: Page) {
+  return page.locator('canvas').evaluate((canvas) => {
+    const state = (canvas as HTMLCanvasElement).dataset;
+    const animatedNodes = Number(state.animatedNodes ?? 0);
+    const maxNodeStep = Number(state.maxNodeStep ?? Number.POSITIVE_INFINITY);
+    const simulationMs = Number(state.simulationMs ?? Number.POSITIVE_INFINITY);
+
+    return {
+      animatedNodes,
+      hasAnimatedGraph: animatedNodes > 100,
+      maxNodeStep,
+      simulationMs,
+      simulationResponsive: Number.isFinite(simulationMs) && simulationMs < 20,
+      smoothSteps: Number.isFinite(maxNodeStep) && maxNodeStep <= 1.05,
     };
   });
 }

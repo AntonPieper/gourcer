@@ -17,7 +17,7 @@ export function App() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const animationTimeRef = useRef<number | null>(null);
-  const speedDaysPerSecond = 3.2;
+  const speedDaysPerSecond = 1.65;
 
   useEffect(() => {
     if (sidecar && currentTime === null) {

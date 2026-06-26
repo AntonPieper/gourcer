@@ -1,15 +1,4 @@
 import md5 from 'blueimp-md5';
-import {
-  forceCenter,
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  forceX,
-  forceY,
-  type SimulationLinkDatum,
-  type SimulationNodeDatum,
-} from 'd3-force';
 import type {
   ChangeKind,
   CommitEvent,
@@ -38,6 +27,7 @@ export type FrameGroup = {
   color: string;
   fileCount: number;
   id: string;
+  opacity: number;
   shape: {
     center: Point;
     height: number;
@@ -117,7 +107,7 @@ export type TimelineFrame = {
 
 type GraphNodeType = 'directory' | 'file';
 
-type GraphNode = SimulationNodeDatum & {
+type GraphNode = {
   depth: number;
   groupId: string | null;
   id: string;
@@ -125,9 +115,11 @@ type GraphNode = SimulationNodeDatum & {
   path: string;
   radius: number;
   type: GraphNodeType;
+  x?: number;
+  y?: number;
 };
 
-type GraphLink = SimulationLinkDatum<GraphNode> & {
+type GraphLink = {
   id: string;
   sourceId: string;
   targetId: string;
@@ -158,7 +150,6 @@ const hourMs = 60 * 60 * 1000;
 const fileFadeMs = 36 * hourMs;
 const fileNodeRadius = 0.24;
 const directoryNodeRadius = 0.18;
-const collisionPadding = 0.1;
 
 export function buildTimelineFrame(
   sidecar: ParsedSidecar,
@@ -247,44 +238,11 @@ function computeGraphLayout(sidecar: ParsedSidecar, files: FileNode[]): GraphCac
 
   const nodeList = Array.from(nodes.values());
   const edgeList = Array.from(edges.values());
-  const simulation = forceSimulation<GraphNode>(nodeList)
-    .force(
-      'link',
-      forceLink<GraphNode, GraphLink>(edgeList)
-        .id((node) => node.id)
-        .distance((edge) => linkDistance(edge))
-        .strength((edge) => linkStrength(edge)),
-    )
-    .force(
-      'charge',
-      forceManyBody<GraphNode>()
-        .distanceMax(22)
-        .strength((node) => (node.type === 'directory' ? -210 : -42)),
-    )
-    .force(
-      'collide',
-      forceCollide<GraphNode>()
-        .radius((node) => node.radius + collisionPadding)
-        .iterations(4),
-    )
-    .force(
-      'x',
-      forceX<GraphNode>((node) => (anchors.get(node.groupId ?? '')?.x ?? 0) + node.depth * 0.42).strength(0.018),
-    )
-    .force(
-      'y',
-      forceY<GraphNode>((node) => anchors.get(node.groupId ?? '')?.y ?? 0).strength(0.018),
-    )
-    .force('center', forceCenter(0, 0))
-    .stop();
 
-  for (let index = 0; index < 55; index += 1) {
-    simulation.tick();
-  }
-
-  normalizeNodePositions(nodeList);
   enforceGourceTreeSpacing(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
-  relaxCollisions(nodeList, 48);
+  normalizeNodePositions(nodeList);
+  relaxTargetCollisions(nodeList);
+  centerNodePositions(nodeList);
 
   const graph: GraphCache = {
     bounds: boundsFor(nodeList),
@@ -360,7 +318,7 @@ function addEdge(edges: Map<string, GraphLink>, sourceId: string, targetId: stri
   const id = `${sourceId}->${targetId}`;
 
   if (!edges.has(id)) {
-    edges.set(id, { id, sourceId, targetId, source: sourceId, target: targetId });
+    edges.set(id, { id, sourceId, targetId });
   }
 }
 
@@ -474,31 +432,32 @@ function activeGroupsFor(
   files: FrameFile[],
   directories: FrameDirectory[],
 ): FrameGroup[] {
-  const nodesByGroup = new Map<string, Point[]>();
+  const nodesByGroup = new Map<string, { opacity: number; point: Point }[]>();
 
   [...files, ...directories].forEach((node) => {
     if (!node.groupId) {
       return;
     }
 
-    const points = nodesByGroup.get(node.groupId) ?? [];
-    points.push(node.position);
-    nodesByGroup.set(node.groupId, points);
+    const groupNodes = nodesByGroup.get(node.groupId) ?? [];
+    groupNodes.push({ opacity: node.opacity, point: node.position });
+    nodesByGroup.set(node.groupId, groupNodes);
   });
 
   return sidecar.groups
     .map((group) => {
-      const points =
+      const groupNodes =
         nodesByGroup.get(group.id) ??
         group.filePaths
           .map((path) => graph.files[path])
           .filter(isPresent)
-          .map(pointFor);
+          .map((node) => ({ opacity: 1, point: pointFor(node) }));
 
-      if (points.length === 0) {
+      if (groupNodes.length === 0) {
         return null;
       }
 
+      const points = groupNodes.map((node) => node.point);
       const bounds = boundsForPoints(points);
       const padding = 0.75 + Math.sqrt(points.length) * 0.025;
       const width = round(Math.max(1.6, bounds.width + padding * 2));
@@ -508,6 +467,7 @@ function activeGroupsFor(
         color: group.color,
         fileCount: group.filePaths.length,
         id: group.id,
+        opacity: round(Math.max(...groupNodes.map((node) => node.opacity))),
         shape: {
           center: bounds.center,
           height,
@@ -788,18 +748,6 @@ function groupAnchors(sidecar: ParsedSidecar) {
   return anchors;
 }
 
-function linkDistance(edge: GraphLink) {
-  const source = edge.source as GraphNode;
-  const target = edge.target as GraphNode;
-  const depthBonus = Math.min(target.depth, 6) * 0.55;
-  return source.radius + target.radius + (target.type === 'file' ? 1.35 : 4.8 + depthBonus);
-}
-
-function linkStrength(edge: GraphLink) {
-  const target = edge.target as GraphNode;
-  return target.type === 'file' ? 0.18 : 0.42;
-}
-
 function normalizeNodePositions(nodes: GraphNode[]) {
   const bounds = rawBoundsFor(nodes);
   const width = Math.max(bounds.maxX - bounds.minX, 1);
@@ -812,6 +760,96 @@ function normalizeNodePositions(nodes: GraphNode[]) {
     node.x = round(((node.x ?? 0) - centerX) * scale);
     node.y = round(((node.y ?? 0) - centerY) * scale);
   });
+}
+
+function relaxTargetCollisions(nodes: GraphNode[]) {
+  const collidableNodes = nodes.filter((node) => node.type === 'file');
+  const cellSize = 1.6;
+  const iterations = 28;
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    const grid = new Map<string, GraphNode[]>();
+
+    collidableNodes.forEach((node) => {
+      const key = gridKey(node.x ?? 0, node.y ?? 0, cellSize);
+      const cell = grid.get(key) ?? [];
+      cell.push(node);
+      grid.set(key, cell);
+    });
+
+    collidableNodes.forEach((node) => {
+      const cellX = Math.floor((node.x ?? 0) / cellSize);
+      const cellY = Math.floor((node.y ?? 0) / cellSize);
+
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+          const cell = grid.get(`${cellX + offsetX}:${cellY + offsetY}`) ?? [];
+
+          cell.forEach((other) => {
+            if (node.id >= other.id) {
+              return;
+            }
+
+            pushNodesApart(node, other);
+          });
+        }
+      }
+    });
+  }
+}
+
+function pushNodesApart(first: GraphNode, second: GraphNode) {
+  const firstX = first.x ?? 0;
+  const firstY = first.y ?? 0;
+  const secondX = second.x ?? 0;
+  const secondY = second.y ?? 0;
+  const deltaX = secondX - firstX;
+  const deltaY = secondY - firstY;
+  const distance = Math.hypot(deltaX, deltaY);
+  const desiredDistance = collisionDistance(first, second);
+
+  if (distance >= desiredDistance) {
+    return;
+  }
+
+  const angle = distance > 0.001 ? Math.atan2(deltaY, deltaX) : hashAngle(`${first.id}:${second.id}`);
+  const push = (desiredDistance - distance) * 0.5;
+  const pushX = Math.cos(angle) * push;
+  const pushY = Math.sin(angle) * push;
+
+  first.x = firstX - pushX;
+  first.y = firstY - pushY;
+  second.x = secondX + pushX;
+  second.y = secondY + pushY;
+}
+
+function collisionDistance(first: GraphNode, second: GraphNode) {
+  const base = first.radius + second.radius;
+
+  if (first.type === 'file' && second.type === 'file') {
+    return base + 0.5;
+  }
+
+  if (first.type === 'directory' && second.type === 'directory') {
+    return base + 1.5;
+  }
+
+  return base + 0.55;
+}
+
+function centerNodePositions(nodes: GraphNode[]) {
+  const bounds = rawBoundsFor(nodes);
+  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerY = (bounds.minY + bounds.maxY) / 2;
+
+  nodes.forEach((node) => {
+    node.x = round((node.x ?? 0) - centerX);
+    node.y = round((node.y ?? 0) - centerY);
+  });
+}
+
+function gridKey(x: number, y: number, cellSize: number) {
+  return `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}`;
 }
 
 function enforceGourceTreeSpacing(nodes: Record<string, GraphNode>, edges: GraphLink[]) {
@@ -902,75 +940,6 @@ function placeFileChildren(parent: GraphNode, files: GraphNode[]) {
     fileIndex += filesInRing;
     ring += 1;
   }
-}
-
-function relaxCollisions(nodes: GraphNode[], iterations: number) {
-  const targets = new Map(
-    nodes.map((node) => [node.id, { x: node.x ?? 0, y: node.y ?? 0 }]),
-  );
-  const simulation = forceSimulation<GraphNode>(nodes)
-    .force(
-      'collide',
-      forceCollide<GraphNode>()
-        .radius((node) => node.radius + collisionPadding)
-        .iterations(8),
-    )
-    .force(
-      'x',
-      forceX<GraphNode>((node) => targets.get(node.id)?.x ?? 0).strength(0.012),
-    )
-    .force(
-      'y',
-      forceY<GraphNode>((node) => targets.get(node.id)?.y ?? 0).strength(0.012),
-    )
-    .stop();
-
-  for (let index = 0; index < iterations; index += 1) {
-    simulation.tick();
-  }
-
-  for (let iteration = 0; iteration < Math.min(16, iterations); iteration += 1) {
-    let moved = false;
-
-    for (let firstIndex = 0; firstIndex < nodes.length; firstIndex += 1) {
-      for (let secondIndex = firstIndex + 1; secondIndex < nodes.length; secondIndex += 1) {
-        const first = nodes[firstIndex];
-        const second = nodes[secondIndex];
-
-        if (!first || !second) {
-          continue;
-        }
-
-        const dx = (second.x ?? 0) - (first.x ?? 0);
-        const dy = (second.y ?? 0) - (first.y ?? 0);
-        const distance = Math.hypot(dx, dy) || 0.0001;
-        const minimumDistance = first.radius + second.radius + collisionPadding;
-
-        if (distance >= minimumDistance) {
-          continue;
-        }
-
-        const push = (minimumDistance - distance) / 2;
-        const ux = dx / distance;
-        const uy = dy / distance;
-
-        first.x = (first.x ?? 0) - ux * push;
-        first.y = (first.y ?? 0) - uy * push;
-        second.x = (second.x ?? 0) + ux * push;
-        second.y = (second.y ?? 0) + uy * push;
-        moved = true;
-      }
-    }
-
-    if (!moved) {
-      break;
-    }
-  }
-
-  nodes.forEach((node) => {
-    node.x = round(node.x ?? 0);
-    node.y = round(node.y ?? 0);
-  });
 }
 
 function boundsFor(nodes: GraphNode[]): FrameBounds {
