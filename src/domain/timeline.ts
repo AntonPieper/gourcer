@@ -84,6 +84,15 @@ export type FrameBeam = {
   toFilePath: string;
 };
 
+export type FrameChangeLabel = {
+  color: string;
+  id: string;
+  kind: ChangeKind;
+  opacity: number;
+  text: string;
+  toFilePath: string;
+};
+
 export type FrameBounds = {
   center: Point;
   height: number;
@@ -95,6 +104,7 @@ export type TimelineFrame = {
   beams: FrameBeam[];
   bounds: FrameBounds;
   captions: string[];
+  changeLabels: FrameChangeLabel[];
   contributors: FrameContributor[];
   directories: FrameDirectory[];
   edges: FrameEdge[];
@@ -150,6 +160,8 @@ const hourMs = 60 * 60 * 1000;
 const fileFadeMs = 36 * hourMs;
 const fileNodeRadius = 0.24;
 const directoryNodeRadius = 0.18;
+const rootDirectoryId = 'dir:';
+const rootDirectoryPath = '';
 
 export function buildTimelineFrame(
   sidecar: ParsedSidecar,
@@ -165,14 +177,16 @@ export function buildTimelineFrame(
   const files = frameFilesFor(graph, activeFiles);
   const directories = activeDirectoriesFor(graph, files);
   const edges = activeEdgesFor(graph, files, directories);
+  const beams = beamsAt(sidecar.commits, time, beamDurationMs);
 
   return {
     backgroundColor: interpolatePalette(sidecar.settings.backgroundColors, progress),
-    beams: beamsAt(sidecar.commits, time, beamDurationMs),
+    beams,
     bounds: graph.bounds,
     captions: sidecar.captions
       .filter((caption) => caption.start <= time && time <= caption.end)
       .map((caption) => caption.text),
+    changeLabels: changeLabelsAt(sidecar.commits, time, beamDurationMs),
     contributors: contributorsAt(sidecar, graph, lifecycle, time),
     directories,
     edges,
@@ -212,11 +226,21 @@ function activeGraphFor(sidecar: ParsedSidecar, activeFiles: ActiveFileState[]):
 function computeGraphLayout(sidecar: ParsedSidecar, files: FileNode[]): GraphCache {
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphLink>();
-  const anchors = groupAnchors(sidecar);
+
+  nodes.set(rootDirectoryId, {
+    depth: 0,
+    groupId: null,
+    id: rootDirectoryId,
+    name: 'root',
+    path: rootDirectoryPath,
+    radius: 0,
+    type: 'directory',
+    x: 0,
+    y: 0,
+  });
 
   files.forEach((file) => {
-    ensureDirectoryChain(file.path, file.groupId, nodes, edges, anchors);
-    const seed = seedPosition(file.path, file.groupId, segmentsFor(file.path).length, anchors);
+    ensureDirectoryChain(file.path, file.groupId, nodes, edges);
     const fileNode: GraphNode = {
       depth: segmentsFor(file.path).length,
       groupId: file.groupId,
@@ -225,24 +249,24 @@ function computeGraphLayout(sidecar: ParsedSidecar, files: FileNode[]): GraphCac
       path: file.path,
       radius: fileNodeRadius,
       type: 'file',
-      x: seed.x,
-      y: seed.y,
+      x: 0,
+      y: 0,
     };
     nodes.set(fileNode.id, fileNode);
 
     const parent = parentDirectoryPath(file.path);
-    if (parent) {
-      addEdge(edges, dirId(parent), fileNode.id);
-    }
+    addEdge(edges, parent ? dirId(parent) : rootDirectoryId, fileNode.id);
   });
 
   const nodeList = Array.from(nodes.values());
   const edgeList = Array.from(edges.values());
 
-  enforceGourceTreeSpacing(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
-  normalizeNodePositions(nodeList);
+  layoutOutwardTree(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
+  scaleNodePositions(nodeList);
+  enforceOutwardPositions(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
   relaxTargetCollisions(nodeList);
-  centerNodePositions(nodeList);
+  enforceOutwardPositions(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
+  relaxTargetCollisions(nodeList);
 
   const graph: GraphCache = {
     bounds: boundsFor(nodeList),
@@ -268,7 +292,6 @@ function ensureDirectoryChain(
   groupId: string | null,
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphLink>,
-  anchors: Map<string, Point>,
 ) {
   const segments = segmentsFor(filePath).slice(0, -1);
 
@@ -277,7 +300,6 @@ function ensureDirectoryChain(
     const id = dirId(path);
 
     if (!nodes.has(id)) {
-      const seed = seedPosition(path, groupId, index + 1, anchors);
       nodes.set(id, {
         depth: index + 1,
         groupId,
@@ -286,32 +308,14 @@ function ensureDirectoryChain(
         path,
         radius: directoryNodeRadius + Math.min(index, 4) * 0.025,
         type: 'directory',
-        x: seed.x,
-        y: seed.y,
+        x: 0,
+        y: 0,
       });
     }
 
     const parent = segments.slice(0, index).join('/');
-    if (parent) {
-      addEdge(edges, dirId(parent), id);
-    }
+    addEdge(edges, parent ? dirId(parent) : rootDirectoryId, id);
   });
-}
-
-function seedPosition(
-  path: string,
-  groupId: string | null,
-  depth: number,
-  anchors: Map<string, Point>,
-) {
-  const anchor = anchors.get(groupId ?? '') ?? { x: 0, y: 0 };
-  const angle = hashAngle(path);
-  const distance = 0.7 + depth * 0.62 + hashUnit(`${path}:distance`) * 1.15;
-
-  return {
-    x: round(anchor.x + Math.cos(angle) * distance + depth * 0.18),
-    y: round(anchor.y + Math.sin(angle) * distance),
-  };
 }
 
 function addEdge(edges: Map<string, GraphLink>, sourceId: string, targetId: string) {
@@ -366,6 +370,21 @@ function frameFilesFor(graph: GraphCache, activeFiles: ActiveFileState[]): Frame
 
 function activeDirectoriesFor(graph: GraphCache, files: FrameFile[]): FrameDirectory[] {
   const directories = new Map<string, FrameDirectory>();
+  const root = graph.directories[rootDirectoryPath];
+  const rootOpacity = Math.max(...files.map((file) => file.opacity), 0);
+
+  if (root && rootOpacity > 0.01) {
+    directories.set(rootDirectoryPath, {
+      depth: root.depth,
+      groupId: null,
+      id: root.id,
+      name: root.name,
+      opacity: rootOpacity,
+      path: rootDirectoryPath,
+      position: pointFor(root),
+      radius: root.radius,
+    });
+  }
 
   files.forEach((file) => {
     const segments = segmentsFor(file.path).slice(0, -1);
@@ -728,37 +747,215 @@ function beamsAt(commits: CommitEvent[], time: number, beamDurationMs: number): 
   });
 }
 
+function changeLabelsAt(
+  commits: CommitEvent[],
+  time: number,
+  labelDurationMs: number,
+): FrameChangeLabel[] {
+  return commits
+    .flatMap((commit) => {
+      const age = time - commit.timestamp;
+
+      if (age < 0 || age > labelDurationMs) {
+        return [];
+      }
+
+      const progress = age / labelDurationMs;
+      const fadeIn = clamp(progress / 0.08, 0.28, 1);
+      const opacity = round(clamp(smoothstep(1 - progress) * fadeIn, 0, 1));
+
+      if (opacity <= 0.02) {
+        return [];
+      }
+
+      return commit.changes.map((change, index) => ({
+        color: change.beamColor,
+        id: `${commit.id}:${index}:label`,
+        kind: change.kind,
+        opacity,
+        text: labelTextFor(change.filePath),
+        toFilePath: change.filePath,
+      }));
+    })
+    .sort((first, second) => second.opacity - first.opacity || first.text.localeCompare(second.text))
+    .slice(0, 12);
+}
+
 function beamStrengthFor(editSize: number) {
   return round(clamp(Math.log2(Math.max(1, editSize) + 1) / 6.2, 0.18, 0.95));
 }
 
-function groupAnchors(sidecar: ParsedSidecar) {
-  const anchors = new Map<string, Point>();
-  const groups =
-    sidecar.groups.length > 0
-      ? sidecar.groups
-      : [{ id: '', title: '', color: '', filePaths: [], pathPrefixes: [] }];
-  const radius = Math.max(8, Math.sqrt(groups.length) * 9);
+function labelTextFor(path: string) {
+  const name = basename(path);
 
-  groups.forEach((group, index) => {
-    anchors.set(group.id, pointOnCircle(radius, angleFor(index, groups.length) - Math.PI / 2));
-  });
+  if (name.length <= 36) {
+    return name;
+  }
 
-  anchors.set('', { x: 0, y: 0 });
-  return anchors;
+  return `${name.slice(0, 18)}...${name.slice(-15)}`;
 }
 
-function normalizeNodePositions(nodes: GraphNode[]) {
+function layoutOutwardTree(nodes: Record<string, GraphNode>, edges: GraphLink[]) {
+  const directoryChildren = new Map<string, GraphNode[]>();
+  const fileChildren = new Map<string, GraphNode[]>();
+  const weights = new Map<string, number>();
+  const root = nodes[rootDirectoryId];
+
+  edges.forEach((edge) => {
+    const source = nodes[edge.sourceId];
+    const target = nodes[edge.targetId];
+
+    if (!source || !target) {
+      return;
+    }
+
+    const children = target.type === 'directory' ? directoryChildren : fileChildren;
+    const siblings = children.get(source.id) ?? [];
+    siblings.push(target);
+    children.set(source.id, siblings);
+  });
+
+  [...directoryChildren.values(), ...fileChildren.values()].forEach((children) => {
+    children.sort((first, second) => first.path.localeCompare(second.path));
+  });
+
+  if (!root) {
+    return;
+  }
+
+  root.x = 0;
+  root.y = 0;
+
+  const computeWeight = (node: GraphNode): number => {
+    if (node.type === 'file') {
+      return 1;
+    }
+
+    const childWeight = (directoryChildren.get(node.id) ?? []).reduce(
+      (total, child) => total + computeWeight(child),
+      0,
+    );
+    const weight = Math.max(1, childWeight + (fileChildren.get(node.id)?.length ?? 0));
+    weights.set(node.id, weight);
+    return weight;
+  };
+
+  computeWeight(root);
+  placeOutwardChildren({
+    centerAngle: -Math.PI / 2,
+    directoryChildren,
+    fileChildren,
+    node: root,
+    sectorEnd: Math.PI * 1.52,
+    sectorStart: -Math.PI * 1.52,
+    weights,
+  });
+}
+
+function placeOutwardChildren({
+  centerAngle,
+  directoryChildren,
+  fileChildren,
+  node,
+  sectorEnd,
+  sectorStart,
+  weights,
+}: {
+  centerAngle: number;
+  directoryChildren: Map<string, GraphNode[]>;
+  fileChildren: Map<string, GraphNode[]>;
+  node: GraphNode;
+  sectorEnd: number;
+  sectorStart: number;
+  weights: Map<string, number>;
+}) {
+  const directoryNodes = directoryChildren.get(node.id) ?? [];
+  const files = fileChildren.get(node.id) ?? [];
+  const totalDirectoryWeight = directoryNodes.reduce(
+    (total, child) => total + (weights.get(child.id) ?? 1),
+    0,
+  );
+  let cursor = sectorStart;
+
+  placeOutwardFiles(node, files, centerAngle, Math.max(0.22, sectorEnd - sectorStart));
+
+  directoryNodes.forEach((child) => {
+    const childWeight = weights.get(child.id) ?? 1;
+    const span = ((sectorEnd - sectorStart) * childWeight) / Math.max(totalDirectoryWeight, 1);
+    const childStart = cursor;
+    const childEnd = cursor + span;
+    const childAngle = (childStart + childEnd) / 2;
+    const parentDistance = distanceFromOrigin(pointFor(node));
+    const childDistance =
+      parentDistance + 5.45 + Math.log2(childWeight + 1) * 0.74 + Math.min(child.depth, 8) * 0.36;
+
+    child.x = round(Math.cos(childAngle) * childDistance);
+    child.y = round(Math.sin(childAngle) * childDistance);
+
+    const childSectorPadding = Math.min(span * 0.18, 0.28);
+    placeOutwardChildren({
+      centerAngle: childAngle,
+      directoryChildren,
+      fileChildren,
+      node: child,
+      sectorEnd: childEnd - childSectorPadding,
+      sectorStart: childStart + childSectorPadding,
+      weights,
+    });
+
+    cursor += span;
+  });
+}
+
+function placeOutwardFiles(
+  parent: GraphNode,
+  files: GraphNode[],
+  centerAngle: number,
+  sectorWidth: number,
+) {
+  if (files.length === 0) {
+    return;
+  }
+
+  const spacing = fileNodeRadius * 2 + 0.54;
+  const arc = Math.min(Math.max(sectorWidth * 0.72, 0.48), Math.PI * 1.08);
+  const parentDistance = distanceFromOrigin(pointFor(parent));
+  let fileIndex = 0;
+  let ring = 0;
+
+  while (fileIndex < files.length) {
+    const distance = parentDistance + 1.35 + ring * spacing * 1.08;
+    const capacity = Math.max(3, Math.floor((arc * Math.max(distance, 1)) / spacing));
+    const filesInRing = Math.min(capacity, files.length - fileIndex);
+    const jitter = (hashUnit(`${parent.path}:${ring}`) - 0.5) * Math.min(arc * 0.08, 0.08);
+
+    for (let index = 0; index < filesInRing; index += 1) {
+      const file = files[fileIndex + index];
+
+      if (!file) {
+        continue;
+      }
+
+      const progress = filesInRing === 1 ? 0.5 : index / (filesInRing - 1);
+      const angle = centerAngle - arc / 2 + arc * progress + jitter;
+      file.x = round(Math.cos(angle) * distance);
+      file.y = round(Math.sin(angle) * distance);
+    }
+
+    fileIndex += filesInRing;
+    ring += 1;
+  }
+}
+
+function scaleNodePositions(nodes: GraphNode[]) {
   const bounds = rawBoundsFor(nodes);
   const width = Math.max(bounds.maxX - bounds.minX, 1);
   const height = Math.max(bounds.maxY - bounds.minY, 1);
-  const scale = Math.min(58 / width, 39 / height);
-  const centerX = (bounds.minX + bounds.maxX) / 2;
-  const centerY = (bounds.minY + bounds.maxY) / 2;
+  const scale = Math.min(104 / width, 90 / height, 1);
 
   nodes.forEach((node) => {
-    node.x = round(((node.x ?? 0) - centerX) * scale);
-    node.y = round(((node.y ?? 0) - centerY) * scale);
+    node.x = round((node.x ?? 0) * scale);
+    node.y = round((node.y ?? 0) * scale);
   });
 }
 
@@ -837,109 +1034,44 @@ function collisionDistance(first: GraphNode, second: GraphNode) {
   return base + 0.55;
 }
 
-function centerNodePositions(nodes: GraphNode[]) {
-  const bounds = rawBoundsFor(nodes);
-  const centerX = (bounds.minX + bounds.maxX) / 2;
-  const centerY = (bounds.minY + bounds.maxY) / 2;
+function enforceOutwardPositions(nodes: Record<string, GraphNode>, edges: GraphLink[]) {
+  const sortedEdges = edges
+    .map((edge) => ({
+      edge,
+      source: nodes[edge.sourceId],
+      target: nodes[edge.targetId],
+    }))
+    .filter(({ source, target }) => source && target)
+    .sort(({ source: first }, { source: second }) => first!.depth - second!.depth);
 
-  nodes.forEach((node) => {
-    node.x = round((node.x ?? 0) - centerX);
-    node.y = round((node.y ?? 0) - centerY);
-  });
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    sortedEdges.forEach(({ source, target }) => {
+      if (!source || !target) {
+        return;
+      }
+
+      const sourceDistance = distanceFromOrigin(pointFor(source));
+      const targetDistance = distanceFromOrigin(pointFor(target));
+      const minimumDistance = sourceDistance + (target.type === 'directory' ? 1.35 : 0.38);
+
+      if (targetDistance >= minimumDistance) {
+        return;
+      }
+
+      const fallbackAngle = hashAngle(target.id);
+      const angle =
+        targetDistance > 0.001
+          ? Math.atan2(target.y ?? 0, target.x ?? 0)
+          : fallbackAngle;
+
+      target.x = round(Math.cos(angle) * minimumDistance);
+      target.y = round(Math.sin(angle) * minimumDistance);
+    });
+  }
 }
 
 function gridKey(x: number, y: number, cellSize: number) {
   return `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}`;
-}
-
-function enforceGourceTreeSpacing(nodes: Record<string, GraphNode>, edges: GraphLink[]) {
-  const directoryChildren = new Map<string, GraphNode[]>();
-  const fileChildren = new Map<string, GraphNode[]>();
-
-  edges.forEach((edge) => {
-    const source = nodes[edge.sourceId];
-    const target = nodes[edge.targetId];
-
-    if (!source || !target) {
-      return;
-    }
-
-    const children = target.type === 'directory' ? directoryChildren : fileChildren;
-    const siblings = children.get(source.id) ?? [];
-    siblings.push(target);
-    children.set(source.id, siblings);
-  });
-
-  [...directoryChildren.values(), ...fileChildren.values()].forEach((children) => {
-    children.sort((first, second) => first.path.localeCompare(second.path));
-  });
-
-  Object.values(nodes)
-    .filter((node) => node.type === 'directory')
-    .sort((first, second) => first.depth - second.depth || first.path.localeCompare(second.path))
-    .forEach((parent) => {
-      placeDirectoryChildren(parent, directoryChildren.get(parent.id) ?? [], nodes);
-      placeFileChildren(parent, fileChildren.get(parent.id) ?? []);
-    });
-}
-
-function placeDirectoryChildren(
-  parent: GraphNode,
-  children: GraphNode[],
-  nodes: Record<string, GraphNode>,
-) {
-  if (children.length === 0) {
-    return;
-  }
-
-  const grandparentPath = parentDirectoryPath(parent.path);
-  const grandparent = grandparentPath ? nodes[dirId(grandparentPath)] : null;
-  const parentNormal = grandparent
-    ? Math.atan2((parent.y ?? 0) - (grandparent.y ?? 0), (parent.x ?? 0) - (grandparent.x ?? 0))
-    : hashAngle(parent.path);
-  const spread = children.length <= 2 ? Math.PI * 0.82 : Math.min(Math.PI * 1.8, Math.PI * 0.62 + children.length * 0.18);
-  const start = parentNormal - spread / 2;
-
-  children.forEach((child, index) => {
-    const progress = children.length === 1 ? 0.5 : index / (children.length - 1);
-    const angle = start + spread * progress;
-    const distance = parent.radius + child.radius + 5.2 + Math.min(child.depth, 7) * 0.68;
-
-    child.x = round((parent.x ?? 0) + Math.cos(angle) * distance);
-    child.y = round((parent.y ?? 0) + Math.sin(angle) * distance);
-  });
-}
-
-function placeFileChildren(parent: GraphNode, files: GraphNode[]) {
-  if (files.length === 0) {
-    return;
-  }
-
-  const spacing = fileNodeRadius * 2 + 0.38;
-  let fileIndex = 0;
-  let ring = 0;
-
-  while (fileIndex < files.length) {
-    const distance = parent.radius + 1.25 + ring * spacing;
-    const capacity = Math.max(6, Math.floor((Math.PI * 2 * distance) / spacing));
-    const filesInRing = Math.min(capacity, files.length - fileIndex);
-    const offset = hashAngle(`${parent.path}:${ring}`);
-
-    for (let index = 0; index < filesInRing; index += 1) {
-      const file = files[fileIndex + index];
-
-      if (!file) {
-        continue;
-      }
-
-      const angle = offset + angleFor(index, filesInRing);
-      file.x = round((parent.x ?? 0) + Math.cos(angle) * distance);
-      file.y = round((parent.y ?? 0) + Math.sin(angle) * distance);
-    }
-
-    fileIndex += filesInRing;
-    ring += 1;
-  }
 }
 
 function boundsFor(nodes: GraphNode[]): FrameBounds {
@@ -1078,6 +1210,10 @@ function pointFor(node: GraphNode | undefined): Point {
     x: round(node?.x ?? 0),
     y: round(node?.y ?? 0),
   };
+}
+
+function distanceFromOrigin(point: Point) {
+  return Math.hypot(point.x, point.y);
 }
 
 function pointOnCircle(radius: number, angle: number): Point {

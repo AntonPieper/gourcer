@@ -16,6 +16,7 @@ import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import type {
   FrameBeam,
   FrameBounds,
+  FrameChangeLabel,
   FrameContributor,
   FrameDirectory,
   FrameEdge,
@@ -34,6 +35,7 @@ type AnimatedGraphNode = SimulationNodeDatum & {
   id: string;
   kind: AnimatedNodeKind;
   opacity: number;
+  parentId?: string;
   path: string;
   radius: number;
   targetOpacity: number;
@@ -104,13 +106,13 @@ function SceneContents({ frame }: { frame: TimelineFrame }) {
           edges={animatedFrame.edges}
           files={animatedFrame.files}
         />
-        <DirectoryNodesLayer directories={animatedFrame.directories} />
         <FileNodesLayer files={animatedFrame.files} />
         <BeamsLayer
           beams={animatedFrame.beams}
           contributors={animatedFrame.contributors}
           files={animatedFrame.files}
         />
+        <ChangeLabelsLayer labels={animatedFrame.changeLabels} files={animatedFrame.files} />
         {animatedFrame.contributors.map((contributor) => (
           <ContributorSprite contributor={contributor} key={contributor.id} />
         ))}
@@ -180,6 +182,7 @@ function useAnimatedTimelineFrame(frame: TimelineFrame) {
     });
 
     simulation.tick(1);
+    enforceAnimatedOutwardTree(nodes);
 
     let maxNodeStep = 0;
 
@@ -233,6 +236,8 @@ function useAnimatedTimelineFrame(frame: TimelineFrame) {
     );
 
     gl.domElement.dataset.animatedNodes = String(nodes.size);
+    gl.domElement.dataset.changeLabels = String(latestFrameRef.current.changeLabels.length);
+    gl.domElement.dataset.directoryDots = '0';
     gl.domElement.dataset.maxNodeStep = maxNodeStep.toFixed(3);
     gl.domElement.dataset.simulationMs = (performance.now() - startedAt).toFixed(3);
   });
@@ -344,6 +349,7 @@ function upsertAnimatedNode({
     existing.file = kind === 'file' ? (frameNode as FrameFile) : undefined;
     existing.groupId = frameNode.groupId;
     existing.kind = kind;
+    existing.parentId = parentId;
     existing.path = frameNode.path;
     existing.radius = frameNode.radius;
     existing.targetOpacity = frameNode.opacity;
@@ -366,6 +372,7 @@ function upsertAnimatedNode({
     id: frameNode.id,
     kind,
     opacity: initial ? frameNode.opacity : 0,
+    parentId,
     path: frameNode.path,
     radius: frameNode.radius,
     targetOpacity: frameNode.opacity,
@@ -468,6 +475,48 @@ function removeInvisibleGraphEntities(
   });
 
   return removedEntities;
+}
+
+function enforceAnimatedOutwardTree(nodes: Map<string, AnimatedGraphNode>) {
+  const root = nodes.get('dir:');
+
+  if (!root) {
+    return;
+  }
+
+  const rootPoint = pointFromAnimatedNode(root);
+  const sortedNodes = Array.from(nodes.values())
+    .filter((node) => node.parentId)
+    .sort((first, second) => first.path.length - second.path.length);
+
+  sortedNodes.forEach((node) => {
+    const parent = node.parentId ? nodes.get(node.parentId) : null;
+
+    if (!parent) {
+      return;
+    }
+
+    const parentDistance = distanceBetween(rootPoint, pointFromAnimatedNode(parent));
+    const nodePoint = pointFromAnimatedNode(node);
+    const nodeDistance = distanceBetween(rootPoint, nodePoint);
+    const minimumDistance = parentDistance + (node.kind === 'directory' ? 1.1 : 0.34);
+
+    if (nodeDistance >= minimumDistance) {
+      return;
+    }
+
+    const targetAngle = Math.atan2(node.targetY - rootPoint.y, node.targetX - rootPoint.x);
+    const currentAngle =
+      nodeDistance > 0.001
+        ? Math.atan2(nodePoint.y - rootPoint.y, nodePoint.x - rootPoint.x)
+        : targetAngle;
+    const angle = Number.isFinite(currentAngle) ? currentAngle : targetAngle;
+
+    node.x = rootPoint.x + Math.cos(angle) * minimumDistance;
+    node.y = rootPoint.y + Math.sin(angle) * minimumDistance;
+    node.vx = (node.vx ?? 0) * 0.45;
+    node.vy = (node.vy ?? 0) * 0.45;
+  });
 }
 
 function frameFromAnimatedGraph(
@@ -646,6 +695,10 @@ function pointFromAnimatedNode(node: AnimatedGraphNode): Point {
     x: node.x ?? node.targetX,
     y: node.y ?? node.targetY,
   };
+}
+
+function distanceBetween(first: Point, second: Point) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
 }
 
 function approach(current: number, target: number, dt: number, rate: number) {
@@ -854,8 +907,8 @@ function SemanticGroupMesh({ group }: { group: FrameGroup }) {
         color="#f8fbff"
         opacity={group.opacity}
         position={[0, group.shape.height / 2 + 0.28, 0.12]}
-        scale={[Math.min(group.shape.width * 0.34, 3.2), 0.38, 1]}
         text={group.title}
+        worldHeight={0.42}
       />
     </group>
   );
@@ -931,17 +984,6 @@ function EdgesLayer({
       <primitive attach="material" object={material} />
     </lineSegments>
   );
-}
-
-function DirectoryNodesLayer({ directories }: { directories: FrameDirectory[] }) {
-  const { geometry, material } = useCircleLayer(
-    directories,
-    () => '#9fb3c8',
-    -0.02,
-    0.42,
-  );
-
-  return <mesh frustumCulled={false} geometry={geometry} material={material} />;
 }
 
 function FileNodesLayer({ files }: { files: FrameFile[] }) {
@@ -1171,23 +1213,83 @@ function triangleBeamVertices(fromPoint: Point, toPoint: Point, baseRadius: numb
   return [from.x, from.y, from.z, baseA.x, baseA.y, baseA.z, baseB.x, baseB.y, baseB.z];
 }
 
+function ChangeLabelsLayer({
+  files,
+  labels,
+}: {
+  files: FrameFile[];
+  labels: FrameChangeLabel[];
+}) {
+  const filesByPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+
+  return (
+    <>
+      {labels.map((label, index) => {
+        const file = filesByPath.get(label.toFilePath);
+
+        if (!file) {
+          return null;
+        }
+
+        const opacity = label.opacity * file.opacity;
+
+        if (opacity <= 0.03) {
+          return null;
+        }
+
+        const angle = stableAngle(label.id);
+        const offset = file.radius + 0.42 + (index % 3) * 0.14;
+
+        return (
+          <TextSprite
+            color="#f8fbff"
+            key={label.id}
+            opacity={opacity}
+            position={[
+              file.position.x + Math.cos(angle) * offset,
+              file.position.y + Math.sin(angle) * offset,
+              1.2,
+            ]}
+            shadowColor={label.color}
+            text={label.text}
+            worldHeight={1.7}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 function TextSprite({
   color,
   opacity = 1,
   position,
-  scale,
+  shadowColor = 'rgba(0,0,0,0.75)',
   text,
+  worldHeight,
 }: {
   color: string;
   opacity?: number;
   position: [number, number, number];
-  scale: [number, number, number];
+  shadowColor?: string;
   text: string;
+  worldHeight: number;
 }) {
-  const texture = useMemo(() => {
+  const textureInfo = useMemo(() => {
+    const measureCanvas = document.createElement('canvas');
+    const measureContext = measureCanvas.getContext('2d');
+
+    if (!measureContext) {
+      return null;
+    }
+
+    const fontSize = 46;
+    const font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
+    measureContext.font = font;
+    const textWidth = Math.ceil(measureContext.measureText(text).width);
     const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 128;
+    canvas.width = Math.max(128, Math.ceil(textWidth + 72));
+    canvas.height = 104;
     const context = canvas.getContext('2d');
 
     if (!context) {
@@ -1195,26 +1297,45 @@ function TextSprite({
     }
 
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.font = '700 46px Inter, system-ui, sans-serif';
+    context.font = font;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.shadowBlur = 12;
-    context.shadowColor = 'rgba(0,0,0,0.75)';
+    context.shadowBlur = 16;
+    context.shadowColor = shadowColor;
     context.fillStyle = color;
     context.fillText(text, canvas.width / 2, canvas.height / 2);
 
     const canvasTexture = new THREE.CanvasTexture(canvas);
+    canvasTexture.minFilter = THREE.LinearFilter;
     canvasTexture.needsUpdate = true;
-    return canvasTexture;
-  }, [color, text]);
+    return {
+      aspect: canvas.width / canvas.height,
+      texture: canvasTexture,
+    };
+  }, [color, shadowColor, text]);
 
-  if (!texture) {
+  useEffect(
+    () => () => {
+      textureInfo?.texture.dispose();
+    },
+    [textureInfo],
+  );
+
+  if (!textureInfo) {
     return null;
   }
 
   return (
-    <sprite position={position} scale={scale}>
-      <spriteMaterial map={texture} opacity={opacity} transparent />
+    <sprite
+      position={position}
+      scale={[worldHeight * textureInfo.aspect, worldHeight, 1]}
+    >
+      <spriteMaterial
+        depthTest={false}
+        map={textureInfo.texture}
+        opacity={opacity}
+        transparent
+      />
     </sprite>
   );
 }

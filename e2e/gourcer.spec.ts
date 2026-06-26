@@ -20,6 +20,7 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   });
   await expect.poll(() => legendAnimates(page)).toBe(true);
   await expect.poll(() => graphAnimationState(page), { timeout: 15_000 }).toMatchObject({
+    directoryDotsHidden: true,
     hasAnimatedGraph: true,
     simulationResponsive: true,
     smoothSteps: true,
@@ -61,6 +62,7 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   }, max);
 
   await expect.poll(() => graphAnimationState(page), { timeout: 5_000 }).toMatchObject({
+    hasChangeLabels: true,
     smoothSteps: true,
   });
   await expect(page.getByText('100%')).toBeVisible();
@@ -120,11 +122,16 @@ async function graphAnimationState(page: Page) {
   return page.locator('canvas').evaluate((canvas) => {
     const state = (canvas as HTMLCanvasElement).dataset;
     const animatedNodes = Number(state.animatedNodes ?? 0);
+    const changeLabels = Number(state.changeLabels ?? 0);
+    const directoryDots = Number(state.directoryDots ?? Number.POSITIVE_INFINITY);
     const maxNodeStep = Number(state.maxNodeStep ?? Number.POSITIVE_INFINITY);
     const simulationMs = Number(state.simulationMs ?? Number.POSITIVE_INFINITY);
 
     return {
       animatedNodes,
+      changeLabels,
+      directoryDotsHidden: directoryDots === 0,
+      hasChangeLabels: changeLabels > 0,
       hasAnimatedGraph: animatedNodes > 100,
       maxNodeStep,
       simulationMs,

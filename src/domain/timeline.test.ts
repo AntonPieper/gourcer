@@ -129,6 +129,13 @@ describe('buildTimelineFrame', () => {
         toFilePath: 'src/engine/timeline.ts',
       }),
     ]);
+    expect(pulseFrame.changeLabels).toEqual([
+      expect.objectContaining({
+        color: '#ffad4d',
+        text: 'timeline.ts',
+        toFilePath: 'src/engine/timeline.ts',
+      }),
+    ]);
 
     const afterAllPulses = buildTimelineFrame(
       sidecar,
@@ -189,6 +196,42 @@ describe('buildTimelineFrame', () => {
     expect(minimumFileClearance(frame.files)).toBeGreaterThanOrEqual(0.05);
     expect(edgeLengthStats(frame).directoryToDirectory.p50).toBeGreaterThanOrEqual(5);
     expect(edgeLengthStats(frame).directoryToDirectory.p10).toBeGreaterThanOrEqual(2);
+  });
+
+  it('lays directory branches outward from a root instead of folding through the graph', () => {
+    const sidecar = parseSidecar(
+      JSON.parse(
+        readFileSync(join(process.cwd(), 'public/sidecars/hell-ui.json'), 'utf8'),
+      ) as RawSidecar,
+    );
+    const frame = buildTimelineFrame(
+      sidecar,
+      sidecar.timeline.start + (sidecar.timeline.end - sidecar.timeline.start) * 0.75,
+    );
+    const nodes = new Map<string, FrameDirectory | FrameFile>(
+      [...frame.directories, ...frame.files].map((node) => [node.id, node]),
+    );
+    const root = nodes.get('dir:');
+
+    expect(root).toBeDefined();
+    expect(frame.edges.filter((edge) => edge.sourceId === 'dir:').length).toBeGreaterThan(0);
+
+    const inwardDirectoryEdges = frame.edges.filter((edge) => {
+      if (!edge.targetId.startsWith('dir:')) {
+        return false;
+      }
+
+      const source = nodes.get(edge.sourceId);
+      const target = nodes.get(edge.targetId);
+
+      if (!source || !target) {
+        return false;
+      }
+
+      return distanceFromRoot(target.position) <= distanceFromRoot(source.position) + 1.2;
+    });
+
+    expect(inwardDirectoryEdges).toEqual([]);
   });
 
   it('renders commit lasers only after the pulse and keeps them ephemeral', () => {
@@ -299,6 +342,10 @@ function minimumFileMetric(
 
 function distanceBetween(first: Point, second: Point) {
   return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function distanceFromRoot(point: Point) {
+  return Math.hypot(point.x, point.y);
 }
 
 function edgeLengthStats(frame: TimelineFrame) {
