@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 test('renders the hell-ui history with live controls and a nonblank Three canvas', async ({
   page,
 }) => {
-  await page.goto('/');
+  await page.goto('./');
 
   await expect(page.getByRole('heading', { name: 'Gourcer' })).toBeVisible();
   await expect(page.getByTestId('timeline-hud')).toBeVisible();
