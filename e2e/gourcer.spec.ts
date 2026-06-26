@@ -14,10 +14,12 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   await expect(page.locator('canvas')).toBeVisible();
 
   await expect.poll(() => page.locator('.legend-item').count()).toBeGreaterThan(0);
-  await expect.poll(() => canvasStats(page)).toMatchObject({
-    hasBrightPixels: true,
-    hasColorVariance: true,
-  });
+  await expect
+    .poll(() => canvasStats(page), { timeout: 15_000 })
+    .toMatchObject({
+      hasBrightPixels: true,
+      hasColorVariance: true,
+    });
 
   await page.getByLabel('Pause timeline').click();
   const scrubber = page.getByLabel('Scrub timeline');

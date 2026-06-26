@@ -15,9 +15,11 @@
     "lint": "eslint .",
     "e2e": "playwright test",
     "ci:install": "pnpm install --frozen-lockfile",
+    "ci:playwright": "pnpm exec playwright install --with-deps chromium",
+    "ci:e2e": "pnpm exec playwright test --project=chromium --project=mobile-chromium",
     "ci:test": "pnpm run lint && pnpm run test",
     "ci:build": "pnpm run build",
-    "ci:verify": "pnpm run ci:test && pnpm run ci:build"
+    "ci:verify": "pnpm run ci:test && pnpm run ci:build && pnpm run ci:e2e"
   },
   "dependencies": {
     "@react-three/fiber": "^9.4.0",
