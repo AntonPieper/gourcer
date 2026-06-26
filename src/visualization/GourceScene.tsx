@@ -204,77 +204,83 @@ function EdgesLayer({
 }
 
 function DirectoryNodesLayer({ directories }: { directories: FrameDirectory[] }) {
-  const { geometry, material } = usePointsLayer(
+  const { geometry, material } = useCircleLayer(
     directories,
     () => '#9fb3c8',
-    (directory) => 8 + Math.max(0, 4 - directory.depth),
     -0.02,
+    0.42,
   );
 
-  return <points geometry={geometry} material={material} />;
+  return <mesh frustumCulled={false} geometry={geometry} material={material} />;
 }
 
 function FileNodesLayer({ files }: { files: FrameFile[] }) {
-  const { geometry, material } = usePointsLayer(
+  const { geometry, material } = useCircleLayer(
     files,
     (file) => file.language.color,
-    () => 4.4,
     0.08,
+    0.96,
   );
 
-  return <points geometry={geometry} material={material} />;
+  return <mesh frustumCulled={false} geometry={geometry} material={material} />;
 }
 
-function usePointsLayer<T extends { opacity: number; position: Point }>(
+function useCircleLayer<T extends { opacity: number; position: Point; radius: number }>(
   nodes: T[],
   colorFor: (node: T) => string,
-  sizeFor: (node: T) => number,
   z: number,
+  opacityScale: number,
 ) {
   const geometry = useMemo(() => {
-    const positions = new Float32Array(nodes.length * 3);
+    const base = new THREE.CircleGeometry(1, 28);
+    const buffer = new THREE.InstancedBufferGeometry();
+    const offsets = new Float32Array(nodes.length * 3);
     const colors = new Float32Array(nodes.length * 3);
     const opacities = new Float32Array(nodes.length);
-    const sizes = new Float32Array(nodes.length);
+    const radii = new Float32Array(nodes.length);
     const color = new THREE.Color();
 
+    buffer.index = base.index;
+    buffer.setAttribute('position', base.getAttribute('position'));
+
     nodes.forEach((node, index) => {
-      positions[index * 3] = node.position.x;
-      positions[index * 3 + 1] = node.position.y;
-      positions[index * 3 + 2] = z;
+      offsets[index * 3] = node.position.x;
+      offsets[index * 3 + 1] = node.position.y;
+      offsets[index * 3 + 2] = z;
       color.set(colorFor(node));
       colors[index * 3] = color.r;
       colors[index * 3 + 1] = color.g;
       colors[index * 3 + 2] = color.b;
-      opacities[index] = node.opacity;
-      sizes[index] = sizeFor(node);
+      opacities[index] = node.opacity * opacityScale;
+      radii[index] = node.radius;
     });
 
-    const buffer = new THREE.BufferGeometry();
-    buffer.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    buffer.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
-    buffer.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
-    buffer.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    buffer.setAttribute('aOffset', new THREE.InstancedBufferAttribute(offsets, 3));
+    buffer.setAttribute('aColor', new THREE.InstancedBufferAttribute(colors, 3));
+    buffer.setAttribute('aOpacity', new THREE.InstancedBufferAttribute(opacities, 1));
+    buffer.setAttribute('aRadius', new THREE.InstancedBufferAttribute(radii, 1));
+    buffer.instanceCount = nodes.length;
     return buffer;
-  }, [colorFor, nodes, sizeFor, z]);
+  }, [colorFor, nodes, opacityScale, z]);
   const material = useMemo(
     () =>
       new THREE.ShaderMaterial({
         depthWrite: false,
+        side: THREE.DoubleSide,
         transparent: true,
         vertexShader: `
           attribute vec3 aColor;
+          attribute vec3 aOffset;
           attribute float aOpacity;
-          attribute float aSize;
+          attribute float aRadius;
           varying vec3 vColor;
           varying float vOpacity;
 
           void main() {
             vColor = aColor;
             vOpacity = aOpacity;
-            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-            gl_PointSize = aSize;
-            gl_Position = projectionMatrix * mvPosition;
+            vec3 worldPosition = aOffset + vec3(position.xy * aRadius, 0.0);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPosition, 1.0);
           }
         `,
         fragmentShader: `
@@ -282,10 +288,7 @@ function usePointsLayer<T extends { opacity: number; position: Point }>(
           varying float vOpacity;
 
           void main() {
-            vec2 centered = gl_PointCoord - vec2(0.5);
-            float distanceToCenter = length(centered);
-            float alpha = smoothstep(0.5, 0.22, distanceToCenter) * vOpacity;
-            gl_FragColor = vec4(vColor, alpha);
+            gl_FragColor = vec4(vColor, vOpacity);
           }
         `,
       }),
@@ -333,33 +336,65 @@ function BeamMesh({
 }) {
   const contributor = contributors.find((item) => item.id === beam.fromContributorId);
   const file = files.find((item) => item.path === beam.toFilePath);
-  const material = useBeamMaterial(beam.color, beam.intensity * beam.strength * 0.58);
-  const geometry = useMemo(() => new THREE.CylinderGeometry(1, 1, 1, 10, 1, true), []);
+  const material = useBeamMaterial(beam.color, beam.intensity);
+  const geometry = useMemo(
+    () =>
+      contributor && file
+        ? triangleBeamGeometry(contributor.position, file.position, file.radius)
+        : new THREE.BufferGeometry(),
+    [
+      contributor?.position.x,
+      contributor?.position.y,
+      file?.position.x,
+      file?.position.y,
+      file?.radius,
+    ],
+  );
 
   if (!contributor || !file) {
     return null;
   }
 
-  const from = vectorFromPoint(contributor.position, 0.52);
-  const to = vectorFromPoint(file.position, 0.24);
-  const direction = to.clone().sub(from);
-  const length = direction.length();
-  const midpoint = from.clone().add(to).multiplyScalar(0.5);
-  const quaternion = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 1, 0),
-    direction.clone().normalize(),
-  );
-
   return (
-    <mesh
-      geometry={geometry}
-      position={midpoint}
-      quaternion={quaternion}
-      scale={[beam.width * 0.82, length, beam.width * 0.82]}
-    >
+    <mesh geometry={geometry}>
       <primitive attach="material" object={material} />
     </mesh>
   );
+}
+
+function triangleBeamGeometry(fromPoint: Point, toPoint: Point, baseRadius: number) {
+  const from = vectorFromPoint(fromPoint, 0.42);
+  const to = vectorFromPoint(toPoint, 0.42);
+  const direction = new THREE.Vector2(to.x - from.x, to.y - from.y);
+  const length = direction.length();
+  const geometry = new THREE.BufferGeometry();
+
+  if (length <= 0.001) {
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    return geometry;
+  }
+
+  const perpendicular = new THREE.Vector2(-direction.y / length, direction.x / length);
+  const baseA = new THREE.Vector3(
+    to.x + perpendicular.x * baseRadius,
+    to.y + perpendicular.y * baseRadius,
+    to.z,
+  );
+  const baseB = new THREE.Vector3(
+    to.x - perpendicular.x * baseRadius,
+    to.y - perpendicular.y * baseRadius,
+    to.z,
+  );
+
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(
+      [from.x, from.y, from.z, baseA.x, baseA.y, baseA.z, baseB.x, baseB.y, baseB.z],
+      3,
+    ),
+  );
+  geometry.setIndex([0, 1, 2]);
+  return geometry;
 }
 
 function TextSprite({
@@ -460,32 +495,25 @@ function useBeamMaterial(color: string, intensity: number) {
         uniforms: {
           uColor: { value: new THREE.Color(color) },
           uIntensity: { value: intensity },
-          uTime: { value: 0 },
         },
         vertexShader: `
-          varying float vPulse;
-          uniform float uTime;
-
           void main() {
-            vPulse = 0.72 + 0.28 * sin(uTime * 22.0 + position.y * 16.0);
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
         `,
         fragmentShader: `
           uniform vec3 uColor;
           uniform float uIntensity;
-          varying float vPulse;
 
           void main() {
-            gl_FragColor = vec4(uColor, clamp(uIntensity * vPulse, 0.0, 0.95));
+            gl_FragColor = vec4(uColor, clamp(uIntensity, 0.0, 0.9));
           }
         `,
       }),
     [color, intensity],
   );
 
-  useFrame(({ clock }) => {
-    material.uniforms.uTime!.value = clock.elapsedTime;
+  useFrame(() => {
     material.uniforms.uIntensity!.value = intensity;
     material.uniforms.uColor!.value.set(color);
   });

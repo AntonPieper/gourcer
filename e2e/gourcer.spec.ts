@@ -16,12 +16,23 @@ test('renders the hell-ui history with live controls and a nonblank Three canvas
   await expect.poll(() => graphStats(page), { timeout: 15_000 }).toMatchObject({
     framed: true,
     hasConnectedGraph: true,
+    hasReadableSpacing: true,
   });
   await expect.poll(() => legendAnimationState(page)).toMatchObject({
     animates: true,
   });
 
+  const playingTime = await currentTimelineTime(page);
+  await expect
+    .poll(() => currentTimelineTime(page), { timeout: 5_000 })
+    .toBeGreaterThan(playingTime);
+
   await page.getByLabel('Pause timeline').click();
+  await page.waitForTimeout(150);
+  const pausedTime = await currentTimelineTime(page);
+  await page.waitForTimeout(500);
+  expect(await currentTimelineTime(page)).toBe(pausedTime);
+
   if (testInfo.project.name === 'chromium') {
     const beforeInteraction = await graphInteractionState(page);
     await page.mouse.move(640, 360);
@@ -54,14 +65,23 @@ async function graphStats(page: Page) {
     const files = Number(element.getAttribute('data-files') ?? 0);
     const directories = Number(element.getAttribute('data-directories') ?? 0);
     const edges = Number(element.getAttribute('data-edges') ?? 0);
+    const minFileClearance = Number(element.getAttribute('data-min-file-clearance') ?? 0);
+    const minFileSpacing = Number(element.getAttribute('data-min-file-spacing') ?? 0);
     const width = Number(element.getAttribute('data-bounds-width') ?? 0);
     const height = Number(element.getAttribute('data-bounds-height') ?? 0);
 
     return {
-      framed: width > 4 && width <= 28 && height > 4 && height <= 16,
+      framed: width > 4 && width <= 60 && height > 4 && height <= 42,
       hasConnectedGraph: files > 100 && directories > 20 && edges > files,
+      hasReadableSpacing: minFileSpacing >= 0.5 && minFileClearance >= 0.05,
     };
   });
+}
+
+async function currentTimelineTime(page: Page) {
+  return page
+    .getByTestId('graph-debug')
+    .evaluate((element) => Number(element.getAttribute('data-current-time') ?? 0));
 }
 
 async function legendAnimationState(page: Page) {

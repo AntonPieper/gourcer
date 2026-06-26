@@ -56,6 +56,7 @@ export type FrameDirectory = {
   opacity: number;
   path: string;
   position: Point;
+  radius: number;
 };
 
 export type FrameFile = {
@@ -65,6 +66,7 @@ export type FrameFile = {
   opacity: number;
   path: string;
   position: Point;
+  radius: number;
 };
 
 export type FrameEdge = {
@@ -91,7 +93,6 @@ export type FrameBeam = {
   kind: ChangeKind;
   strength: number;
   toFilePath: string;
-  width: number;
 };
 
 export type FrameBounds = {
@@ -151,6 +152,9 @@ const lifecycleCache = new WeakMap<ParsedSidecar, Map<string, Lifecycle>>();
 const dayMs = 24 * 60 * 60 * 1000;
 const hourMs = 60 * 60 * 1000;
 const fileFadeMs = 36 * hourMs;
+const fileNodeRadius = 0.24;
+const directoryNodeRadius = 0.18;
+const collisionPadding = 0.05;
 
 export function buildTimelineFrame(
   sidecar: ParsedSidecar,
@@ -228,6 +232,7 @@ export function createRepositoryGraphLayout(sidecar: ParsedSidecar): RawGraphLay
       id: node.id,
       name: node.name,
       path: node.path,
+      radius: node.radius,
       type: node.type,
       x: round(node.x ?? 0),
       y: round(node.y ?? 0),
@@ -243,7 +248,7 @@ function graphFromRawLayout(layout: RawGraphLayout): GraphCache {
       id: node.id,
       name: node.name,
       path: node.path,
-      radius: node.type === 'directory' ? 0.32 : 0.13,
+      radius: node.radius ?? (node.type === 'directory' ? directoryNodeRadius : fileNodeRadius),
       type: node.type,
       x: node.x,
       y: node.y,
@@ -274,17 +279,21 @@ function graphFromRawLayout(layout: RawGraphLayout): GraphCache {
 function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphLink>();
+  const anchors = groupAnchors(sidecar);
 
   Object.values(sidecar.files).forEach((file) => {
-    ensureDirectoryChain(file.path, file.groupId, nodes, edges);
+    ensureDirectoryChain(file.path, file.groupId, nodes, edges, anchors);
+    const seed = seedPosition(file.path, file.groupId, segmentsFor(file.path).length, anchors);
     const fileNode: GraphNode = {
       depth: segmentsFor(file.path).length,
       groupId: file.groupId,
       id: fileId(file.path),
       name: basename(file.path),
       path: file.path,
-      radius: 0.13,
+      radius: fileNodeRadius,
       type: 'file',
+      x: seed.x,
+      y: seed.y,
     };
     nodes.set(fileNode.id, fileNode);
 
@@ -296,7 +305,6 @@ function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
 
   const nodeList = Array.from(nodes.values());
   const edgeList = Array.from(edges.values());
-  const anchors = groupAnchors(sidecar);
   const simulation = forceSimulation<GraphNode>(nodeList)
     .force(
       'link',
@@ -308,26 +316,32 @@ function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
     .force(
       'charge',
       forceManyBody<GraphNode>()
-        .distanceMax(4.5)
-        .strength((node) => (node.type === 'directory' ? -32 : -7)),
+        .distanceMax(10)
+        .strength((node) => (node.type === 'directory' ? -72 : -18)),
     )
-    .force('collide', forceCollide<GraphNode>().radius((node) => node.radius + 0.07).iterations(1))
+    .force(
+      'collide',
+      forceCollide<GraphNode>()
+        .radius((node) => node.radius + collisionPadding)
+        .iterations(4),
+    )
     .force(
       'x',
-      forceX<GraphNode>((node) => (anchors.get(node.groupId ?? '')?.x ?? 0) + node.depth * 0.18).strength(0.05),
+      forceX<GraphNode>((node) => (anchors.get(node.groupId ?? '')?.x ?? 0) + node.depth * 0.26).strength(0.032),
     )
     .force(
       'y',
-      forceY<GraphNode>((node) => anchors.get(node.groupId ?? '')?.y ?? 0).strength(0.05),
+      forceY<GraphNode>((node) => anchors.get(node.groupId ?? '')?.y ?? 0).strength(0.032),
     )
     .force('center', forceCenter(0, 0))
     .stop();
 
-  for (let index = 0; index < 120; index += 1) {
+  for (let index = 0; index < 420; index += 1) {
     simulation.tick();
   }
 
   normalizeNodePositions(nodeList);
+  relaxCollisions(nodeList, 220);
 
   const graph: GraphCache = {
     bounds: boundsFor(nodeList),
@@ -353,6 +367,7 @@ function ensureDirectoryChain(
   groupId: string | null,
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphLink>,
+  anchors: Map<string, Point>,
 ) {
   const segments = segmentsFor(filePath).slice(0, -1);
 
@@ -361,14 +376,17 @@ function ensureDirectoryChain(
     const id = dirId(path);
 
     if (!nodes.has(id)) {
+      const seed = seedPosition(path, groupId, index + 1, anchors);
       nodes.set(id, {
         depth: index + 1,
         groupId,
         id,
         name: basename(path),
         path,
-        radius: 0.25 + Math.min(index, 4) * 0.03,
+        radius: directoryNodeRadius + Math.min(index, 4) * 0.025,
         type: 'directory',
+        x: seed.x,
+        y: seed.y,
       });
     }
 
@@ -377,6 +395,22 @@ function ensureDirectoryChain(
       addEdge(edges, dirId(parent), id);
     }
   });
+}
+
+function seedPosition(
+  path: string,
+  groupId: string | null,
+  depth: number,
+  anchors: Map<string, Point>,
+) {
+  const anchor = anchors.get(groupId ?? '') ?? { x: 0, y: 0 };
+  const angle = hashAngle(path);
+  const distance = 0.7 + depth * 0.62 + hashUnit(`${path}:distance`) * 1.15;
+
+  return {
+    x: round(anchor.x + Math.cos(angle) * distance + depth * 0.18),
+    y: round(anchor.y + Math.sin(angle) * distance),
+  };
 }
 
 function addEdge(edges: Map<string, GraphLink>, sourceId: string, targetId: string) {
@@ -410,6 +444,7 @@ function activeFilesAt(
         opacity,
         path: file.path,
         position: pointFor(node),
+        radius: node.radius,
       } satisfies FrameFile;
     })
     .filter(isPresent)
@@ -440,6 +475,7 @@ function activeDirectoriesFor(graph: GraphCache, files: FrameFile[]): FrameDirec
         opacity,
         path,
         position: pointFor(node),
+        radius: node.radius,
       });
     });
   });
@@ -620,18 +656,30 @@ function contributorsAt(
   return Object.values(sidecar.contributors)
     .map((contributor, index) => {
       const nextPulse = nextPulseFor(sidecar.commits, contributor.id, time, lifecycle);
-      const recentPulse = recentPulseFor(sidecar.commits, contributor.id, time);
-      const opacity =
-        nextPulse && nextPulse.timestamp - time <= pulseWindowMs
-          ? round(1 - (nextPulse.timestamp - time) / pulseWindowMs)
-          : 0;
-      const targetPath = opacity > 0 ? nextPulse?.filePath ?? null : null;
-      const targetPosition = targetPath ? pointFor(graph.files[targetPath]) : undefined;
+      const previousPulse = previousPulseFor(sidecar.commits, contributor.id, time);
       const contributorAngle = angleFor(index, Math.max(Object.keys(sidecar.contributors).length, 1));
       const fallback = pointOnCircle(7.4, contributorAngle);
-      const anchor = targetPosition ?? fallback;
-      const fling = recentPulse ? flingOffset(recentPulse, time, contributorAngle) : { x: 0, y: 0 };
-      const drift = pointOnCircle(0.42, contributorAngle + time / (dayMs * 1.25));
+      const previousPosition = previousPulse
+        ? pointFor(graph.files[previousPulse.filePath])
+        : fallback;
+      const nextPosition = nextPulse ? pointFor(graph.files[nextPulse.filePath]) : previousPosition;
+      const timeUntilNext = nextPulse ? nextPulse.timestamp - time : Infinity;
+      const timeSincePrevious = previousPulse ? time - previousPulse.timestamp : Infinity;
+      const anticipation =
+        nextPulse && timeUntilNext <= pulseWindowMs
+          ? smoothstep(1 - timeUntilNext / pulseWindowMs)
+          : 0;
+      const recentOpacity =
+        previousPulse && timeSincePrevious <= pulseWindowMs
+          ? 1 - timeSincePrevious / pulseWindowMs
+          : 0;
+      const upcomingOpacity =
+        nextPulse && timeUntilNext <= pulseWindowMs ? 1 - timeUntilNext / pulseWindowMs : 0;
+      const anchor = lerpPoint(previousPosition, nextPosition, anticipation);
+      const drift = pointOnCircle(0.22, contributorAngle + time / (dayMs * 4.5));
+      const opacity = round(clamp(Math.max(recentOpacity, upcomingOpacity), 0, 1));
+      const targetPath =
+        upcomingOpacity > 0 ? nextPulse?.filePath ?? null : previousPulse?.filePath ?? null;
 
       return {
         avatarUrl: gravatarUrl(contributor.email),
@@ -639,8 +687,8 @@ function contributorsAt(
         name: contributor.name,
         opacity,
         position: {
-          x: round(anchor.x + fling.x + drift.x),
-          y: round(anchor.y + fling.y + drift.y),
+          x: round(anchor.x + drift.x),
+          y: round(anchor.y + drift.y),
         },
         targetPath,
       };
@@ -677,7 +725,7 @@ function nextPulseFor(
   return null;
 }
 
-function recentPulseFor(commits: CommitEvent[], contributorId: string, time: number) {
+function previousPulseFor(commits: CommitEvent[], contributorId: string, time: number) {
   for (let index = commits.length - 1; index >= 0; index -= 1) {
     const commit = commits[index];
 
@@ -692,32 +740,12 @@ function recentPulseFor(commits: CommitEvent[], contributorId: string, time: num
     }
 
     return {
-      editSize: firstChange.editSize,
       filePath: firstChange.filePath,
       timestamp: commit.timestamp,
     };
   }
 
   return null;
-}
-
-function flingOffset(
-  pulse: { editSize: number; filePath: string; timestamp: number },
-  time: number,
-  fallbackAngle: number,
-) {
-  const age = time - pulse.timestamp;
-  const duration = 2.5 * dayMs;
-
-  if (age < 0 || age > duration) {
-    return { x: 0, y: 0 };
-  }
-
-  const strength = beamStrengthFor(pulse.editSize);
-  const magnitude = (1 - age / duration) * (1.1 + strength * 3.2);
-  const angle = hashAngle(pulse.filePath) || fallbackAngle;
-
-  return pointOnCircle(magnitude, angle);
 }
 
 function languagesAt(
@@ -760,26 +788,26 @@ function languagesAt(
 
 function beamsAt(commits: CommitEvent[], time: number, beamDurationMs: number): FrameBeam[] {
   return commits.flatMap((commit) => {
-    const distance = Math.abs(commit.timestamp - time);
+    const age = time - commit.timestamp;
 
-    if (distance > beamDurationMs / 2) {
+    if (age < 0 || age > beamDurationMs) {
       return [];
     }
 
-    const intensity = round(1 - distance / (beamDurationMs / 2));
+    const ageFade = 1 - age / beamDurationMs;
 
     return commit.changes.map((change, index) => {
       const strength = beamStrengthFor(change.editSize);
+      const diffOpacity = 0.2 + strength * 0.68;
 
       return {
         color: change.beamColor,
         fromContributorId: commit.author.id,
         id: `${commit.id}:${index}`,
-        intensity,
+        intensity: round(clamp(Math.max(0.2, diffOpacity * ageFade), 0.2, 0.9)),
         kind: change.kind,
         strength,
         toFilePath: change.filePath,
-        width: round(0.035 + strength * 0.105),
       };
     });
   });
@@ -791,8 +819,11 @@ function beamStrengthFor(editSize: number) {
 
 function groupAnchors(sidecar: ParsedSidecar) {
   const anchors = new Map<string, Point>();
-  const groups = sidecar.groups.length > 0 ? sidecar.groups : [{ id: '', title: '', color: '', filePaths: [], pathPrefixes: [] }];
-  const radius = Math.max(2.8, Math.sqrt(groups.length) * 3.4);
+  const groups =
+    sidecar.groups.length > 0
+      ? sidecar.groups
+      : [{ id: '', title: '', color: '', filePaths: [], pathPrefixes: [] }];
+  const radius = Math.max(4.2, Math.sqrt(groups.length) * 5.8);
 
   groups.forEach((group, index) => {
     anchors.set(group.id, pointOnCircle(radius, angleFor(index, groups.length) - Math.PI / 2));
@@ -803,20 +834,21 @@ function groupAnchors(sidecar: ParsedSidecar) {
 }
 
 function linkDistance(edge: GraphLink) {
+  const source = edge.source as GraphNode;
   const target = edge.target as GraphNode;
-  return target.type === 'file' ? 0.52 : 0.88;
+  return source.radius + target.radius + (target.type === 'file' ? 0.48 : 0.78);
 }
 
 function linkStrength(edge: GraphLink) {
   const target = edge.target as GraphNode;
-  return target.type === 'file' ? 0.42 : 0.72;
+  return target.type === 'file' ? 0.32 : 0.62;
 }
 
 function normalizeNodePositions(nodes: GraphNode[]) {
   const bounds = rawBoundsFor(nodes);
   const width = Math.max(bounds.maxX - bounds.minX, 1);
   const height = Math.max(bounds.maxY - bounds.minY, 1);
-  const scale = Math.min(25 / width, 13.5 / height);
+  const scale = Math.min(42 / width, 25 / height);
   const centerX = (bounds.minX + bounds.maxX) / 2;
   const centerY = (bounds.minY + bounds.maxY) / 2;
 
@@ -826,8 +858,91 @@ function normalizeNodePositions(nodes: GraphNode[]) {
   });
 }
 
+function relaxCollisions(nodes: GraphNode[], iterations: number) {
+  const targets = new Map(
+    nodes.map((node) => [node.id, { x: node.x ?? 0, y: node.y ?? 0 }]),
+  );
+  const simulation = forceSimulation<GraphNode>(nodes)
+    .force(
+      'collide',
+      forceCollide<GraphNode>()
+        .radius((node) => node.radius + collisionPadding)
+        .iterations(8),
+    )
+    .force(
+      'x',
+      forceX<GraphNode>((node) => targets.get(node.id)?.x ?? 0).strength(0.012),
+    )
+    .force(
+      'y',
+      forceY<GraphNode>((node) => targets.get(node.id)?.y ?? 0).strength(0.012),
+    )
+    .stop();
+
+  for (let index = 0; index < iterations; index += 1) {
+    simulation.tick();
+  }
+
+  for (let iteration = 0; iteration < Math.min(16, iterations); iteration += 1) {
+    let moved = false;
+
+    for (let firstIndex = 0; firstIndex < nodes.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < nodes.length; secondIndex += 1) {
+        const first = nodes[firstIndex];
+        const second = nodes[secondIndex];
+
+        if (!first || !second) {
+          continue;
+        }
+
+        const dx = (second.x ?? 0) - (first.x ?? 0);
+        const dy = (second.y ?? 0) - (first.y ?? 0);
+        const distance = Math.hypot(dx, dy) || 0.0001;
+        const minimumDistance = first.radius + second.radius + collisionPadding;
+
+        if (distance >= minimumDistance) {
+          continue;
+        }
+
+        const push = (minimumDistance - distance) / 2;
+        const ux = dx / distance;
+        const uy = dy / distance;
+
+        first.x = (first.x ?? 0) - ux * push;
+        first.y = (first.y ?? 0) - uy * push;
+        second.x = (second.x ?? 0) + ux * push;
+        second.y = (second.y ?? 0) + uy * push;
+        moved = true;
+      }
+    }
+
+    if (!moved) {
+      break;
+    }
+  }
+
+  nodes.forEach((node) => {
+    node.x = round(node.x ?? 0);
+    node.y = round(node.y ?? 0);
+  });
+}
+
 function boundsFor(nodes: GraphNode[]): FrameBounds {
-  return boundsForPoints(nodes.map(pointFor));
+  if (nodes.length === 0) {
+    return { center: { x: 0, y: 0 }, height: 1, width: 1 };
+  }
+
+  const bounds = nodes.reduce(
+    (current, node) => ({
+      maxX: Math.max(current.maxX, (node.x ?? 0) + node.radius),
+      maxY: Math.max(current.maxY, (node.y ?? 0) + node.radius),
+      minX: Math.min(current.minX, (node.x ?? 0) - node.radius),
+      minY: Math.min(current.minY, (node.y ?? 0) - node.radius),
+    }),
+    { maxX: -Infinity, maxY: -Infinity, minX: Infinity, minY: Infinity },
+  );
+
+  return boundsFromRaw(bounds);
 }
 
 function boundsForPoints(points: Point[]): FrameBounds {
@@ -845,6 +960,10 @@ function boundsForPoints(points: Point[]): FrameBounds {
     { maxX: -Infinity, maxY: -Infinity, minX: Infinity, minY: Infinity },
   );
 
+  return boundsFromRaw(bounds);
+}
+
+function boundsFromRaw(bounds: { maxX: number; maxY: number; minX: number; minY: number }) {
   return {
     center: {
       x: round((bounds.minX + bounds.maxX) / 2),
@@ -953,6 +1072,18 @@ function pointOnCircle(radius: number, angle: number): Point {
   };
 }
 
+function lerpPoint(from: Point, to: Point, progress: number): Point {
+  return {
+    x: round(from.x + (to.x - from.x) * progress),
+    y: round(from.y + (to.y - from.y) * progress),
+  };
+}
+
+function smoothstep(value: number) {
+  const progress = clamp(value, 0, 1);
+  return progress * progress * (3 - 2 * progress);
+}
+
 function angleFor(index: number, total: number) {
   if (total <= 0) {
     return 0;
@@ -969,6 +1100,16 @@ function hashAngle(value: string) {
   }
 
   return (hash / 360) * Math.PI * 2;
+}
+
+function hashUnit(value: string) {
+  let hash = 0;
+
+  for (const character of value) {
+    hash = (hash * 33 + character.charCodeAt(0)) % 10_000;
+  }
+
+  return hash / 10_000;
 }
 
 function clamp(value: number, min: number, max: number) {

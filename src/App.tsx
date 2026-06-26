@@ -1,7 +1,7 @@
 import { Download, Pause, Play, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parseSidecar, type ParsedSidecar, type RawSidecar } from './domain/sidecar';
-import { buildTimelineFrame, type TimelineFrame } from './domain/timeline';
+import { buildTimelineFrame, type FrameFile, type TimelineFrame } from './domain/timeline';
 import { svgToDataUri } from './domain/languages';
 import { GourceScene } from './visualization/GourceScene';
 
@@ -26,7 +26,7 @@ export function App() {
   }, [currentTime, sidecar]);
 
   useEffect(() => {
-    if (!sidecar || currentTime === null || !isPlaying) {
+    if (!sidecar || !isPlaying) {
       animationTimeRef.current = null;
       return;
     }
@@ -34,8 +34,13 @@ export function App() {
     let frameId = 0;
 
     const tick = (now: number) => {
-      const previousNow = animationTimeRef.current ?? now;
-      const elapsedMs = now - previousNow;
+      if (animationTimeRef.current === null) {
+        animationTimeRef.current = now;
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+
+      const elapsedMs = now - animationTimeRef.current;
       const targetFrameMs = exportState.status === 'recording' ? 33 : 90;
 
       if (elapsedMs < targetFrameMs) {
@@ -47,11 +52,9 @@ export function App() {
       const deltaSeconds = Math.min(elapsedMs / 1000, 0.25);
 
       setCurrentTime((time) => {
-        if (time === null) {
-          return sidecar.timeline.start;
-        }
+        const current = time ?? sidecar.timeline.start;
 
-        const nextTime = time + deltaSeconds * speedDaysPerSecond * dayMs;
+        const nextTime = current + deltaSeconds * speedDaysPerSecond * dayMs;
 
         if (nextTime >= sidecar.timeline.end) {
           return exportState.status === 'recording'
@@ -68,7 +71,7 @@ export function App() {
     frameId = requestAnimationFrame(tick);
 
     return () => cancelAnimationFrame(frameId);
-  }, [currentTime, exportState.status, isPlaying, sidecar]);
+  }, [exportState.status, isPlaying, sidecar]);
 
   useEffect(() => {
     if (
@@ -89,7 +92,7 @@ export function App() {
     }
 
     return buildTimelineFrame(sidecar, currentTime, {
-      beamDurationHours: 36,
+      beamDurationHours: speedDaysPerSecond * 24,
       legendWindowDays: 10,
     });
   }, [currentTime, sidecar]);
@@ -167,9 +170,12 @@ export function App() {
         className="graph-debug"
         data-bounds-height={frame.bounds.height}
         data-bounds-width={frame.bounds.width}
+        data-current-time={frame.time}
         data-directories={frame.directories.length}
         data-edges={frame.edges.length}
         data-files={frame.files.length}
+        data-min-file-clearance={minimumFileClearance(frame.files)}
+        data-min-file-spacing={minimumFileDistance(frame.files)}
         data-testid="graph-debug"
       />
     </main>
@@ -330,4 +336,41 @@ function formatDate(time: number) {
     month: 'short',
     year: 'numeric',
   }).format(time);
+}
+
+function minimumFileDistance(files: FrameFile[]) {
+  return minimumFileMetric(files, (first, second, distance) => distance);
+}
+
+function minimumFileClearance(files: FrameFile[]) {
+  return minimumFileMetric(
+    files,
+    (first, second, distance) => distance - first.radius - second.radius,
+  );
+}
+
+function minimumFileMetric(
+  files: FrameFile[],
+  metric: (first: FrameFile, second: FrameFile, distance: number) => number,
+) {
+  let minimum = Infinity;
+
+  for (let firstIndex = 0; firstIndex < files.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < files.length; secondIndex += 1) {
+      const first = files[firstIndex];
+      const second = files[secondIndex];
+
+      if (!first || !second) {
+        continue;
+      }
+
+      const distance = Math.hypot(
+        first.position.x - second.position.x,
+        first.position.y - second.position.y,
+      );
+      minimum = Math.min(minimum, metric(first, second, distance));
+    }
+  }
+
+  return Number.isFinite(minimum) ? Math.round(minimum * 1000) / 1000 : 0;
 }

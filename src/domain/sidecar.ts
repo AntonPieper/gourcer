@@ -66,6 +66,7 @@ export type RawGraphLayout = {
     id: string;
     name: string;
     path: string;
+    radius?: number;
     type: 'directory' | 'file';
     x: number;
     y: number;
