@@ -71,7 +71,7 @@ async function graphStats(page: Page) {
     const height = Number(element.getAttribute('data-bounds-height') ?? 0);
 
     return {
-      framed: width > 4 && width <= 60 && height > 4 && height <= 42,
+      framed: width > 20 && width <= 105 && height > 20 && height <= 100,
       hasConnectedGraph: files > 100 && directories > 20 && edges > files,
       hasReadableSpacing: minFileSpacing >= 0.5 && minFileClearance >= 0.05,
     };

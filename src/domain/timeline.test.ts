@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseSidecar, type RawSidecar } from './sidecar';
-import { buildTimelineFrame, type FrameFile, type Point } from './timeline';
+import {
+  buildTimelineFrame,
+  type FrameDirectory,
+  type FrameEdge,
+  type FrameFile,
+  type Point,
+  type TimelineFrame,
+} from './timeline';
 
 describe('buildTimelineFrame', () => {
   it('builds time-aware captions, legends, contributor anticipation, beams, and background color', () => {
@@ -180,6 +187,8 @@ describe('buildTimelineFrame', () => {
 
     expect(minimumFileDistance(frame.files)).toBeGreaterThanOrEqual(0.5);
     expect(minimumFileClearance(frame.files)).toBeGreaterThanOrEqual(0.05);
+    expect(edgeLengthStats(frame).directoryToDirectory.p50).toBeGreaterThanOrEqual(5);
+    expect(edgeLengthStats(frame).directoryToDirectory.p10).toBeGreaterThanOrEqual(2);
   });
 
   it('renders commit lasers only after the pulse and keeps them ephemeral', () => {
@@ -290,4 +299,43 @@ function minimumFileMetric(
 
 function distanceBetween(first: Point, second: Point) {
   return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function edgeLengthStats(frame: TimelineFrame) {
+  const nodes = new Map<string, FrameDirectory | FrameFile>(
+    [...frame.directories, ...frame.files].map((node) => [node.id, node]),
+  );
+  const directoryToDirectory = edgeLengths(
+    frame.edges.filter((edge) => edge.targetId.startsWith('dir:')),
+    nodes,
+  );
+  const directoryToFile = edgeLengths(
+    frame.edges.filter((edge) => edge.targetId.startsWith('file:')),
+    nodes,
+  );
+
+  return { directoryToDirectory, directoryToFile };
+}
+
+function edgeLengths(
+  edges: FrameEdge[],
+  nodes: Map<string, FrameDirectory | FrameFile>,
+) {
+  const lengths = edges
+    .map((edge) => {
+      const source = nodes.get(edge.sourceId);
+      const target = nodes.get(edge.targetId);
+      return source && target ? distanceBetween(source.position, target.position) : 0;
+    })
+    .filter((length) => length > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    p10: percentile(lengths, 0.1),
+    p50: percentile(lengths, 0.5),
+  };
+}
+
+function percentile(values: number[], percentileValue: number) {
+  return values[Math.floor((values.length - 1) * percentileValue)] ?? 0;
 }

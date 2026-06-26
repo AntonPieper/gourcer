@@ -15,7 +15,6 @@ import type {
   CommitEvent,
   FileNode,
   ParsedSidecar,
-  RawGraphLayout,
 } from './sidecar';
 
 export type Point = {
@@ -142,19 +141,24 @@ type GraphCache = {
   nodes: Record<string, GraphNode>;
 };
 
+type ActiveFileState = {
+  file: FileNode;
+  opacity: number;
+};
+
 type Lifecycle = {
   createdAt: number;
   deletedAt: number | null;
 };
 
-const graphCache = new WeakMap<ParsedSidecar, GraphCache>();
+const activeGraphCache = new WeakMap<ParsedSidecar, Map<string, GraphCache>>();
 const lifecycleCache = new WeakMap<ParsedSidecar, Map<string, Lifecycle>>();
 const dayMs = 24 * 60 * 60 * 1000;
 const hourMs = 60 * 60 * 1000;
 const fileFadeMs = 36 * hourMs;
 const fileNodeRadius = 0.24;
 const directoryNodeRadius = 0.18;
-const collisionPadding = 0.05;
+const collisionPadding = 0.1;
 
 export function buildTimelineFrame(
   sidecar: ParsedSidecar,
@@ -162,11 +166,12 @@ export function buildTimelineFrame(
   options: TimelineFrameOptions = {},
 ): TimelineFrame {
   const progress = timelineProgress(sidecar, time);
-  const graph = graphFor(sidecar);
   const lifecycle = lifecycleFor(sidecar);
   const legendWindowMs = (options.legendWindowDays ?? 7) * dayMs;
   const beamDurationMs = (options.beamDurationHours ?? 18) * hourMs;
-  const files = activeFilesAt(sidecar, graph, lifecycle, time);
+  const activeFiles = activeFileStatesAt(sidecar, lifecycle, time);
+  const graph = activeGraphFor(sidecar, activeFiles);
+  const files = frameFilesFor(graph, activeFiles);
   const directories = activeDirectoriesFor(graph, files);
   const edges = activeEdgesFor(graph, files, directories);
 
@@ -198,90 +203,27 @@ function timelineProgress(sidecar: ParsedSidecar, time: number) {
   return clamp((time - sidecar.timeline.start) / duration, 0, 1);
 }
 
-function graphFor(sidecar: ParsedSidecar): GraphCache {
-  const cached = graphCache.get(sidecar);
+function activeGraphFor(sidecar: ParsedSidecar, activeFiles: ActiveFileState[]): GraphCache {
+  const key = activeFiles.map(({ file }) => file.path).join('\n');
+  const sidecarCache = activeGraphCache.get(sidecar) ?? new Map<string, GraphCache>();
+  const cached = sidecarCache.get(key);
 
   if (cached) {
     return cached;
   }
 
-  if (sidecar.layout) {
-    const graph = graphFromRawLayout(sidecar.layout);
-    graphCache.set(sidecar, graph);
-    return graph;
-  }
-
-  const graph = computeGraphLayout(sidecar);
-  graphCache.set(sidecar, graph);
+  const graph = computeGraphLayout(sidecar, activeFiles.map(({ file }) => file));
+  sidecarCache.set(key, graph);
+  activeGraphCache.set(sidecar, sidecarCache);
   return graph;
 }
 
-export function createRepositoryGraphLayout(sidecar: ParsedSidecar): RawGraphLayout {
-  const graph = computeGraphLayout(sidecar);
-
-  return {
-    bounds: graph.bounds,
-    edges: graph.edges.map((edge) => ({
-      id: edge.id,
-      sourceId: edge.sourceId,
-      targetId: edge.targetId,
-    })),
-    nodes: Object.values(graph.nodes).map((node) => ({
-      depth: node.depth,
-      groupId: node.groupId,
-      id: node.id,
-      name: node.name,
-      path: node.path,
-      radius: node.radius,
-      type: node.type,
-      x: round(node.x ?? 0),
-      y: round(node.y ?? 0),
-    })),
-  };
-}
-
-function graphFromRawLayout(layout: RawGraphLayout): GraphCache {
-  const nodes = layout.nodes.map(
-    (node): GraphNode => ({
-      depth: node.depth,
-      groupId: node.groupId,
-      id: node.id,
-      name: node.name,
-      path: node.path,
-      radius: node.radius ?? (node.type === 'directory' ? directoryNodeRadius : fileNodeRadius),
-      type: node.type,
-      x: node.x,
-      y: node.y,
-    }),
-  );
-
-  return {
-    bounds: layout.bounds,
-    directories: Object.fromEntries(
-      nodes
-        .filter((node) => node.type === 'directory')
-        .map((node) => [node.path, node]),
-    ),
-    edges: layout.edges.map((edge) => ({
-      id: edge.id,
-      source: edge.sourceId,
-      sourceId: edge.sourceId,
-      target: edge.targetId,
-      targetId: edge.targetId,
-    })),
-    files: Object.fromEntries(
-      nodes.filter((node) => node.type === 'file').map((node) => [node.path, node]),
-    ),
-    nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
-  };
-}
-
-function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
+function computeGraphLayout(sidecar: ParsedSidecar, files: FileNode[]): GraphCache {
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphLink>();
   const anchors = groupAnchors(sidecar);
 
-  Object.values(sidecar.files).forEach((file) => {
+  files.forEach((file) => {
     ensureDirectoryChain(file.path, file.groupId, nodes, edges, anchors);
     const seed = seedPosition(file.path, file.groupId, segmentsFor(file.path).length, anchors);
     const fileNode: GraphNode = {
@@ -316,8 +258,8 @@ function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
     .force(
       'charge',
       forceManyBody<GraphNode>()
-        .distanceMax(10)
-        .strength((node) => (node.type === 'directory' ? -72 : -18)),
+        .distanceMax(22)
+        .strength((node) => (node.type === 'directory' ? -210 : -42)),
     )
     .force(
       'collide',
@@ -327,21 +269,22 @@ function computeGraphLayout(sidecar: ParsedSidecar): GraphCache {
     )
     .force(
       'x',
-      forceX<GraphNode>((node) => (anchors.get(node.groupId ?? '')?.x ?? 0) + node.depth * 0.26).strength(0.032),
+      forceX<GraphNode>((node) => (anchors.get(node.groupId ?? '')?.x ?? 0) + node.depth * 0.42).strength(0.018),
     )
     .force(
       'y',
-      forceY<GraphNode>((node) => anchors.get(node.groupId ?? '')?.y ?? 0).strength(0.032),
+      forceY<GraphNode>((node) => anchors.get(node.groupId ?? '')?.y ?? 0).strength(0.018),
     )
     .force('center', forceCenter(0, 0))
     .stop();
 
-  for (let index = 0; index < 420; index += 1) {
+  for (let index = 0; index < 55; index += 1) {
     simulation.tick();
   }
 
   normalizeNodePositions(nodeList);
-  relaxCollisions(nodeList, 220);
+  enforceGourceTreeSpacing(Object.fromEntries(nodeList.map((node) => [node.id, node])), edgeList);
+  relaxCollisions(nodeList, 48);
 
   const graph: GraphCache = {
     bounds: boundsFor(nodeList),
@@ -421,19 +364,32 @@ function addEdge(edges: Map<string, GraphLink>, sourceId: string, targetId: stri
   }
 }
 
-function activeFilesAt(
+function activeFileStatesAt(
   sidecar: ParsedSidecar,
-  graph: GraphCache,
   lifecycle: Map<string, Lifecycle>,
   time: number,
-): FrameFile[] {
+): ActiveFileState[] {
   return Object.values(sidecar.files)
     .map((file) => {
-      const node = graph.files[file.path];
       const life = lifecycle.get(file.path);
       const opacity = life ? opacityForLifecycle(life, time) : 0;
 
-      if (!node || opacity <= 0.01) {
+      if (opacity <= 0.01) {
+        return null;
+      }
+
+      return { file, opacity } satisfies ActiveFileState;
+    })
+    .filter(isPresent)
+    .sort((a, b) => a.file.path.localeCompare(b.file.path));
+}
+
+function frameFilesFor(graph: GraphCache, activeFiles: ActiveFileState[]): FrameFile[] {
+  return activeFiles
+    .map(({ file, opacity }) => {
+      const node = graph.files[file.path];
+
+      if (!node) {
         return null;
       }
 
@@ -447,8 +403,7 @@ function activeFilesAt(
         radius: node.radius,
       } satisfies FrameFile;
     })
-    .filter(isPresent)
-    .sort((a, b) => a.path.localeCompare(b.path));
+    .filter(isPresent);
 }
 
 function activeDirectoriesFor(graph: GraphCache, files: FrameFile[]): FrameDirectory[] {
@@ -823,7 +778,7 @@ function groupAnchors(sidecar: ParsedSidecar) {
     sidecar.groups.length > 0
       ? sidecar.groups
       : [{ id: '', title: '', color: '', filePaths: [], pathPrefixes: [] }];
-  const radius = Math.max(4.2, Math.sqrt(groups.length) * 5.8);
+  const radius = Math.max(8, Math.sqrt(groups.length) * 9);
 
   groups.forEach((group, index) => {
     anchors.set(group.id, pointOnCircle(radius, angleFor(index, groups.length) - Math.PI / 2));
@@ -836,19 +791,20 @@ function groupAnchors(sidecar: ParsedSidecar) {
 function linkDistance(edge: GraphLink) {
   const source = edge.source as GraphNode;
   const target = edge.target as GraphNode;
-  return source.radius + target.radius + (target.type === 'file' ? 0.48 : 0.78);
+  const depthBonus = Math.min(target.depth, 6) * 0.55;
+  return source.radius + target.radius + (target.type === 'file' ? 1.35 : 4.8 + depthBonus);
 }
 
 function linkStrength(edge: GraphLink) {
   const target = edge.target as GraphNode;
-  return target.type === 'file' ? 0.32 : 0.62;
+  return target.type === 'file' ? 0.18 : 0.42;
 }
 
 function normalizeNodePositions(nodes: GraphNode[]) {
   const bounds = rawBoundsFor(nodes);
   const width = Math.max(bounds.maxX - bounds.minX, 1);
   const height = Math.max(bounds.maxY - bounds.minY, 1);
-  const scale = Math.min(42 / width, 25 / height);
+  const scale = Math.min(58 / width, 39 / height);
   const centerX = (bounds.minX + bounds.maxX) / 2;
   const centerY = (bounds.minY + bounds.maxY) / 2;
 
@@ -856,6 +812,96 @@ function normalizeNodePositions(nodes: GraphNode[]) {
     node.x = round(((node.x ?? 0) - centerX) * scale);
     node.y = round(((node.y ?? 0) - centerY) * scale);
   });
+}
+
+function enforceGourceTreeSpacing(nodes: Record<string, GraphNode>, edges: GraphLink[]) {
+  const directoryChildren = new Map<string, GraphNode[]>();
+  const fileChildren = new Map<string, GraphNode[]>();
+
+  edges.forEach((edge) => {
+    const source = nodes[edge.sourceId];
+    const target = nodes[edge.targetId];
+
+    if (!source || !target) {
+      return;
+    }
+
+    const children = target.type === 'directory' ? directoryChildren : fileChildren;
+    const siblings = children.get(source.id) ?? [];
+    siblings.push(target);
+    children.set(source.id, siblings);
+  });
+
+  [...directoryChildren.values(), ...fileChildren.values()].forEach((children) => {
+    children.sort((first, second) => first.path.localeCompare(second.path));
+  });
+
+  Object.values(nodes)
+    .filter((node) => node.type === 'directory')
+    .sort((first, second) => first.depth - second.depth || first.path.localeCompare(second.path))
+    .forEach((parent) => {
+      placeDirectoryChildren(parent, directoryChildren.get(parent.id) ?? [], nodes);
+      placeFileChildren(parent, fileChildren.get(parent.id) ?? []);
+    });
+}
+
+function placeDirectoryChildren(
+  parent: GraphNode,
+  children: GraphNode[],
+  nodes: Record<string, GraphNode>,
+) {
+  if (children.length === 0) {
+    return;
+  }
+
+  const grandparentPath = parentDirectoryPath(parent.path);
+  const grandparent = grandparentPath ? nodes[dirId(grandparentPath)] : null;
+  const parentNormal = grandparent
+    ? Math.atan2((parent.y ?? 0) - (grandparent.y ?? 0), (parent.x ?? 0) - (grandparent.x ?? 0))
+    : hashAngle(parent.path);
+  const spread = children.length <= 2 ? Math.PI * 0.82 : Math.min(Math.PI * 1.8, Math.PI * 0.62 + children.length * 0.18);
+  const start = parentNormal - spread / 2;
+
+  children.forEach((child, index) => {
+    const progress = children.length === 1 ? 0.5 : index / (children.length - 1);
+    const angle = start + spread * progress;
+    const distance = parent.radius + child.radius + 5.2 + Math.min(child.depth, 7) * 0.68;
+
+    child.x = round((parent.x ?? 0) + Math.cos(angle) * distance);
+    child.y = round((parent.y ?? 0) + Math.sin(angle) * distance);
+  });
+}
+
+function placeFileChildren(parent: GraphNode, files: GraphNode[]) {
+  if (files.length === 0) {
+    return;
+  }
+
+  const spacing = fileNodeRadius * 2 + 0.38;
+  let fileIndex = 0;
+  let ring = 0;
+
+  while (fileIndex < files.length) {
+    const distance = parent.radius + 1.25 + ring * spacing;
+    const capacity = Math.max(6, Math.floor((Math.PI * 2 * distance) / spacing));
+    const filesInRing = Math.min(capacity, files.length - fileIndex);
+    const offset = hashAngle(`${parent.path}:${ring}`);
+
+    for (let index = 0; index < filesInRing; index += 1) {
+      const file = files[fileIndex + index];
+
+      if (!file) {
+        continue;
+      }
+
+      const angle = offset + angleFor(index, filesInRing);
+      file.x = round((parent.x ?? 0) + Math.cos(angle) * distance);
+      file.y = round((parent.y ?? 0) + Math.sin(angle) * distance);
+    }
+
+    fileIndex += filesInRing;
+    ring += 1;
+  }
 }
 
 function relaxCollisions(nodes: GraphNode[], iterations: number) {

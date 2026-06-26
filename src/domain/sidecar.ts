@@ -12,7 +12,6 @@ export type RawSidecar = {
   groups?: RawGroup[];
   initialFiles?: string[];
   languages?: Record<string, Partial<Omit<LanguageMetadata, 'extension'>>>;
-  layout?: RawGraphLayout;
   settings?: Partial<SidecarSettings>;
 };
 
@@ -44,33 +43,6 @@ export type RawGroup = {
   id: string;
   pathPrefixes: string[];
   title: string;
-};
-
-export type RawGraphLayout = {
-  bounds: {
-    center: {
-      x: number;
-      y: number;
-    };
-    height: number;
-    width: number;
-  };
-  edges: Array<{
-    id: string;
-    sourceId: string;
-    targetId: string;
-  }>;
-  nodes: Array<{
-    depth: number;
-    groupId: string | null;
-    id: string;
-    name: string;
-    path: string;
-    radius?: number;
-    type: 'directory' | 'file';
-    x: number;
-    y: number;
-  }>;
 };
 
 export type SidecarSettings = {
@@ -128,7 +100,6 @@ export type ParsedSidecar = {
   files: Record<string, FileNode>;
   groups: SemanticGroup[];
   initialFiles: string[];
-  layout: RawGraphLayout | null;
   settings: SidecarSettings;
   timeline: TimelineRange;
 };
@@ -202,7 +173,6 @@ export function parseSidecar(raw: RawSidecar): ParsedSidecar {
     files,
     groups,
     initialFiles,
-    layout: raw.layout ?? null,
     settings,
     timeline: timelineFor(commits),
   };

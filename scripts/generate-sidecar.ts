@@ -2,8 +2,6 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { sidecarFromGitLogs, type GitSidecarOptions } from '../src/domain/git-sidecar';
-import { parseSidecar } from '../src/domain/sidecar';
-import { createRepositoryGraphLayout } from '../src/domain/timeline';
 
 const [repoPathArg, outputPathArg, ...flags] = process.argv.slice(2);
 
@@ -52,7 +50,6 @@ const numstatLog = execFileSync(
 
 const sidecar = sidecarFromGitLogs(statusLog, numstatLog, sidecarOptions(name, maxCommits));
 sidecar.initialFiles = initialFilesBeforeCapturedWindow(repoPath, sidecar.commits[0]?.id);
-sidecar.layout = createRepositoryGraphLayout(parseSidecar(sidecar));
 
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(sidecar, null, 2)}\n`);
